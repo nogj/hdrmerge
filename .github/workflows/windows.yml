@@ -38,6 +38,7 @@ jobs:
           update: true
           install: >-
             mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-angleproject
             mingw-w64-ucrt-x86_64-exiv2
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-libraw
