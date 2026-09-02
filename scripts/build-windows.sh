@@ -45,7 +45,7 @@ copy_runtime_dependencies() {
                 cp "${dependency}" "${destination}"
                 copied=1
             fi
-        done < <(ldd "${binary}" 2>/dev/null | awk '/=> \/mingw64\// { print $3 }')
+        done < <(ldd "${binary}" 2>/dev/null | awk '/=>/ { print $3 }' | grep "^${MINGW_PREFIX}/" || true)
     done < <(find "${dist_dir}" -type f \( -iname '*.exe' -o -iname '*.dll' \) -print0)
 
     if (( copied )); then
@@ -64,7 +64,7 @@ cp "${project_root}/README.md" "${dist_dir}/README.md"
 cat > "${dist_dir}/BUILD-INFO.txt" <<EOF
 HDRMerge Windows x64
 Source revision: ${GITHUB_SHA:-local build}
-Toolchain: MSYS2 MinGW-w64 x64
+Toolchain: MSYS2 UCRT64 x64
 ALGLIB: 3.15.0 GPL
 EOF
 
