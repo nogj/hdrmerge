@@ -11,6 +11,8 @@
 Makefile
 Build*/
 build*/
+dist/
+.build-deps/
 hdrmerge.kde*
 moc_*
 samples/
