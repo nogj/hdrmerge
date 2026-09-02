@@ -49,7 +49,11 @@ void RawParameters::loadCamXyzFromDng() {
                 cc[j][i] = i == j ? 1.0 : 0.0;
             }
         }
+#if EXIV2_TEST_VERSION(0,28,0)
+        Exiv2::Image::UniquePtr src = Exiv2::ImageFactory::open(fileName.toLocal8Bit().constData());
+#else
         Exiv2::Image::AutoPtr src = Exiv2::ImageFactory::open(fileName.toLocal8Bit().constData());
+#endif
         src->readMetadata();
         const Exiv2::ExifData & srcExif = src->exifData();
 
@@ -79,7 +83,7 @@ void RawParameters::loadCamXyzFromDng() {
         if (cmData == srcExif.end()) {
             cmData = srcExif.findKey(Exiv2::ExifKey("Exif.Image.ColorMatrix2"));
         }
-        if (cmData != srcExif.end() && cmData->count() == 3*colors) {
+        if (cmData != srcExif.end() && cmData->count() == static_cast<size_t>(3*colors)) {
             for (int c = 0; c < colors; ++c) {
                 for (int i = 0; i < 3; ++i) {
                     camXyz[c][i] = 0.0;

@@ -1,0 +1,60 @@
+name: Build Windows x64 (release-v0.6)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release-v0.6
+    paths:
+      - ".github/workflows/windows.yml"
+      - "cmake/**"
+      - "data/**"
+      - "scripts/build-windows.sh"
+      - "src/**"
+      - "CMakeLists.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    name: MinGW-w64 x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-angleproject
+            mingw-w64-ucrt-x86_64-exiv2
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-libraw
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-qt5-base
+            mingw-w64-ucrt-x86_64-qt5-tools
+            mingw-w64-ucrt-x86_64-zlib
+            unzip
+
+      - name: Build and assemble portable application
+        run: ./scripts/build-windows.sh
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: HDRMerge-release-v0.6-Windows-x64
+          path: dist/HDRMerge-release-v0.6-Windows-x64
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9

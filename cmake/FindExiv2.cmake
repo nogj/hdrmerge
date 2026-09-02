@@ -18,18 +18,17 @@
 #=============================================================================
 #
 
-if (UNIX)
-  find_package(PkgConfig)
-  if (PKG_CONFIG_FOUND)
-    pkg_check_modules(_EXIV2 exiv2)
-  endif (PKG_CONFIG_FOUND)
-endif (UNIX)
+find_package(PkgConfig QUIET)
+if (PKG_CONFIG_FOUND)
+  pkg_check_modules(_EXIV2 QUIET exiv2)
+endif (PKG_CONFIG_FOUND)
 
 find_path(EXIV2_INCLUDE_DIR
     NAMES
         exiv2/exif.hpp
     PATHS
         ${_EXIV2_INCLUDEDIR}
+        ${_EXIV2_INCLUDE_DIRS}
 )
 
 find_library(EXIV2_LIBRARY
@@ -37,6 +36,7 @@ find_library(EXIV2_LIBRARY
         exiv2
     PATHS
         ${_EXIV2_LIBDIR}
+        ${_EXIV2_LIBRARY_DIRS}
 )
 
 if (EXIV2_LIBRARY)
@@ -47,6 +47,10 @@ if (EXIV2_LIBRARY)
 endif (EXIV2_LIBRARY)
 
 # Get the version number from exiv2/version.hpp and store it in the cache:
+if (_EXIV2_VERSION AND NOT EXIV2_VERSION)
+    set(EXIV2_VERSION "${_EXIV2_VERSION}")
+endif()
+
 if (EXIV2_INCLUDE_DIR AND NOT EXIV2_VERSION)
     set(EXIV2_VERSION_STRING_FOUND FALSE)
 

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.4)
+cmake_minimum_required(VERSION 3.10)
 
 cmake_policy(SET CMP0025 NEW)
 
@@ -20,7 +20,10 @@ if(APPLE)
     endif()
 endif()
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall -Wno-unknown-pragmas")
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+add_compile_options(-Wall -Wno-unknown-pragmas)
 set(PLATFORM "")
 
 # Required and optional packages
@@ -92,7 +95,7 @@ include_directories("${PROJECT_BINARY_DIR}")
 set(PLATFORM_SOURCES "")
 if(WIN32)
     # This is required by libraw.h
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DWIN32 -DLIBRAW_NODLL")
+    add_definitions(-DWIN32)
     set(PLATFORM WIN32)
     configure_file(
         "${PROJECT_SOURCE_DIR}/data/winres.rc"
@@ -188,20 +191,13 @@ endif()
 # Libs
 set(hdrmerge_libs
     "${LibRaw_r_LIBRARIES}"
-    "${EXIV2_LIBRARY}"
+    "${EXIV2_LIBRARIES}"
     "${ZLIB_LIBRARIES}"
 )
 
 if(WIN32)
-    get_filename_component(LIB_PATH "${EXIV2_LIBRARY}" PATH)
-    find_library(EXPAT_LIBRARY libexpat.a "${LIB_PATH}")
-    find_library(ICONV_LIBRARY libiconv.a "${LIB_PATH}")
-    find_library(GETTEXT_LIBRARY libintl.a "${LIB_PATH}")
     set(hdrmerge_libs
         ${hdrmerge_libs}
-        "${EXPAT_LIBRARY}"
-        "${GETTEXT_LIBRARY}"
-        "${ICONV_LIBRARY}"
         psapi
         wsock32
         imm32
@@ -353,4 +349,3 @@ endif()
 if(Boost_FOUND)
     add_subdirectory(test)
 endif()
-
