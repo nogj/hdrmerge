@@ -79,9 +79,9 @@ endif()
 
 # The version number.
 set(HDRMERGE_VERSION_MAJOR 0)
-set(HDRMERGE_VERSION_MINOR 5)
+set(HDRMERGE_VERSION_MINOR 6)
 set(HDRMERGE_VERSION_REV 0)
-set(HDRMERGE_VERSION ${HDRMERGE_VERSION_MAJOR}.${HDRMERGE_VERSION_MINOR}.${HDRMERGE_VERSION_REV})
+set(HDRMERGE_VERSION ${HDRMERGE_VERSION_MAJOR}.${HDRMERGE_VERSION_MINOR}.${HDRMERGE_VERSION_REV}-experimental)
 
 # configure a header file to pass some of the CMake settings to the source code
 configure_file(

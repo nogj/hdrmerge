@@ -53,6 +53,8 @@ private:
     QCheckBox * cropBox;
     QCheckBox * customWhiteLevelBox;
     QSpinBox * customWhiteLevelSpinBox;
+    QCheckBox * autoDeghostBox;
+    QSpinBox * deghostThresholdSpinBox;
 };
 
 } // namespace hdrmerge

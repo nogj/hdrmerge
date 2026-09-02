@@ -119,7 +119,7 @@ enum {
 };
 
 
-void DngFloatWriter::write(Array2D<float> && rawPixels, const RawParameters & p, const QString & dstFileName) {
+bool DngFloatWriter::write(Array2D<float> && rawPixels, const RawParameters & p, const QString & dstFileName) {
     params = &p;
     rawData = std::move(rawPixels);
     width = rawData.getWidth();
@@ -153,7 +153,7 @@ void DngFloatWriter::write(Array2D<float> && rawPixels, const RawParameters & p,
         previewIFD.write(fileData.get(), pos, false);
     }
 
-    Exif::transfer(p.fileName, dstFileName, fileData.get(), dataSize);
+    return Exif::transfer(p.fileName, dstFileName, fileData.get(), dataSize);
 }
 
 

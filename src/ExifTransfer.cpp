@@ -35,7 +35,7 @@ public:
                  const uint8_t * data, size_t dataSize)
     : srcFile(srcFile), dstFile(dstFile), data(data), dataSize(dataSize) {}
 
-    void copyMetadata();
+    bool copyMetadata();
 
 private:
     QString srcFile, dstFile;
@@ -53,14 +53,14 @@ private:
 };
 
 
-void hdrmerge::Exif::transfer(const QString & srcFile, const QString & dstFile,
+bool hdrmerge::Exif::transfer(const QString & srcFile, const QString & dstFile,
                  const uint8_t * data, size_t dataSize) {
     ExifTransfer exif(srcFile, dstFile, data, dataSize);
-    exif.copyMetadata();
+    return exif.copyMetadata();
 }
 
 
-void ExifTransfer::copyMetadata() {
+bool ExifTransfer::copyMetadata() {
     try {
 #if EXIV2_TEST_VERSION(0,28,0)
         dst = Exiv2::ImageFactory::open(BasicIo::UniquePtr(new MemIo(data, dataSize)));
@@ -70,7 +70,7 @@ void ExifTransfer::copyMetadata() {
         dst->readMetadata();
     } catch (Exiv2::Error & e) {
         std::cerr << "Exiv2 error: " << e.what() << std::endl;
-        return;
+        return false;
     }
     try {
         src = Exiv2::ImageFactory::open(srcFile.toLocal8Bit().constData());
@@ -89,8 +89,10 @@ void ExifTransfer::copyMetadata() {
         fileIo.open("wb");
         fileIo.write(dst->io());
         fileIo.close();
+        return true;
     } catch (Exiv2::Error & e) {
         std::cerr << "Exiv2 error: " << e.what() << std::endl;
+        return false;
     }
 }
 

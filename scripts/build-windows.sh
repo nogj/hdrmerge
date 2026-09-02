@@ -4,8 +4,8 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${project_root}/build-windows"
-dist_dir="${project_root}/dist/HDRMerge-release-v0.6-Windows-x64"
-deps_dir="${RUNNER_TEMP:-${project_root}/.build-deps}/hdrmerge-release-v0.6"
+dist_dir="${project_root}/dist/HDRMerge-experimental-Windows-x64"
+deps_dir="${RUNNER_TEMP:-${project_root}/.build-deps}/hdrmerge-experimental"
 alglib_zip="${deps_dir}/alglib-3.15.0.cpp.gpl.zip"
 alglib_root="${deps_dir}/alglib/cpp"
 
@@ -58,9 +58,14 @@ done
 cp "${project_root}/LICENSE" "${dist_dir}/LICENSE.txt"
 cp "${project_root}/README.md" "${dist_dir}/README.md"
 
+cat > "${dist_dir}/qt.conf" <<EOF
+[Paths]
+Plugins = .
+EOF
+
 cat > "${dist_dir}/BUILD-INFO.txt" <<EOF
-HDRMerge release-v0.6 Windows x64
-Source branch: release-v0.6
+HDRMerge 0.6.0 experimental Windows x64
+Source branch: codex/experimental-functional-overhaul
 Source revision: ${GITHUB_SHA:-local build}
 Toolchain: MSYS2 UCRT64 x64
 ALGLIB: 3.15.0 GPL

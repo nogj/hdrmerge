@@ -50,6 +50,7 @@ public:
     void preload(const std::vector<QString> & o) {
         preloadFiles = o;
     }
+    void setSuggestedOutputName(const QString & name) { suggestedOutputName = name; }
 
 public slots:
     void setStatus(const QString & status) {
@@ -68,6 +69,11 @@ private slots:
     void about();
     void loadImages();
     void saveResult();
+    void importMask();
+    void exportMask();
+    void fitPreview();
+    void saveProject();
+    void openProject();
     void layerSelected(QAction * action);
     void toolSelected(QAction * action) {
         lastTool = action;
@@ -89,6 +95,13 @@ private:
     QAction * redoAction;
     QAction * aboutAction;
     QAction * mergeAction;
+    QAction * importMaskAction;
+    QAction * exportMaskAction;
+    QAction * fitPreviewAction;
+    QAction * maskOverlayAction;
+    QAction * clippingAction;
+    QAction * saveProjectAction;
+    QAction * openProjectAction;
 
     QAction * dragToolAction;
     QAction * addGhostAction;
@@ -106,11 +119,14 @@ private:
     QActionGroup * layerSelectorGroup;
     QToolBar * layerSelector;
     QSlider * exposureSlider;
+    QSpinBox * zoomBox;
     QStatusBar * statusBar;
     QLabel * statusLabel;
 
     ImageIO io;
     std::vector<QString> preloadFiles;
+    QString suggestedOutputName;
+    QString pendingMaskPath;
 };
 
 } // namespace hdrmerge

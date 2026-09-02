@@ -49,6 +49,8 @@ private:
     LoadOptions generalOptions;
     SaveOptions saveOptions;
     bool help;
+    bool forceGui;
+    bool forceNoGui;
 };
 
 } // namespace hdrmerge

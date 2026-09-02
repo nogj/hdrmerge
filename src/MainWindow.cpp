@@ -34,6 +34,12 @@
 #include <QProgressDialog>
 #include <QSettings>
 #include <QUrl>
+#include <QLineEdit>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QSaveFile>
+#include <QFile>
 #include "config.h"
 #include "AboutDialog.hpp"
 #include "DngFloatWriter.hpp"
@@ -53,7 +59,8 @@ public:
         setMaximum(100);
         setMinimum(0);
         setMinimumDuration(0);
-        setCancelButtonText(QString());
+        setWindowModality(Qt::WindowModal);
+        setCancelButtonText(tr("Cancel"));
     }
 
     virtual void advance(int percent, const char * message, const char * arg) {
@@ -64,6 +71,7 @@ public:
         QMetaObject::invokeMethod(this, "setValue", Qt::QueuedConnection, Q_ARG(int, percent));
         QMetaObject::invokeMethod(this, "setLabelText", Qt::QueuedConnection, Q_ARG(QString, translatedMessage));
     }
+    virtual bool isCanceled() const { return wasCanceled(); }
 };
 
 
@@ -114,6 +122,14 @@ void MainWindow::createWidgets() {
     exposureSlider->setMaximumWidth(200);
     exposureSlider->setToolTip(tr("Preview brightness. It does NOT affect the HDR result."));
     connect(exposureSlider, SIGNAL(valueChanged(int)), preview, SLOT(setExposureMultiplier(int)));
+
+    zoomBox = new QSpinBox();
+    zoomBox->setRange(10, 400);
+    zoomBox->setSuffix(" %");
+    zoomBox->setValue(100);
+    zoomBox->setToolTip(tr("Preview zoom. Ctrl+mouse wheel also changes zoom."));
+    connect(zoomBox, SIGNAL(valueChanged(int)), preview, SLOT(setZoomPercent(int)));
+    connect(preview, SIGNAL(zoomChanged(int)), zoomBox, SLOT(setValue(int)));
 }
 
 
@@ -142,6 +158,37 @@ void MainWindow::createActions() {
     mergeAction->setEnabled(false);
     connect(mergeAction, SIGNAL(triggered()), this, SLOT(saveResult()));
 
+    importMaskAction = new QAction(tr("Import mask..."), this);
+    importMaskAction->setEnabled(false);
+    connect(importMaskAction, SIGNAL(triggered()), this, SLOT(importMask()));
+
+    exportMaskAction = new QAction(tr("Export mask..."), this);
+    exportMaskAction->setEnabled(false);
+    connect(exportMaskAction, SIGNAL(triggered()), this, SLOT(exportMask()));
+
+    fitPreviewAction = new QAction(tr("Fit preview"), this);
+    fitPreviewAction->setShortcut(tr("Ctrl+0"));
+    connect(fitPreviewAction, SIGNAL(triggered()), this, SLOT(fitPreview()));
+
+    maskOverlayAction = new QAction(tr("Show layer colors"), this);
+    maskOverlayAction->setCheckable(true);
+    maskOverlayAction->setChecked(true);
+    connect(maskOverlayAction, SIGNAL(toggled(bool)), preview, SLOT(setShowMaskOverlay(bool)));
+
+    clippingAction = new QAction(tr("Highlight clipped selections"), this);
+    clippingAction->setCheckable(true);
+    clippingAction->setChecked(true);
+    connect(clippingAction, SIGNAL(toggled(bool)), preview, SLOT(setShowClipping(bool)));
+
+    openProjectAction = new QAction(tr("Open project..."), this);
+    openProjectAction->setShortcut(tr("Ctrl+Shift+O"));
+    connect(openProjectAction, SIGNAL(triggered()), this, SLOT(openProject()));
+
+    saveProjectAction = new QAction(tr("Save project..."), this);
+    saveProjectAction->setShortcut(tr("Ctrl+Shift+S"));
+    saveProjectAction->setEnabled(false);
+    connect(saveProjectAction, SIGNAL(triggered()), this, SLOT(saveProject()));
+
     dragToolAction = new QAction(QIcon(":/images/transform-move.png"), tr("Pan"), nullptr);
     dragToolAction->setCheckable(true);
     connect(dragToolAction, SIGNAL(toggled(bool)), previewArea, SLOT(toggleMoveViewport(bool)));
@@ -161,7 +208,11 @@ void MainWindow::createActions() {
 void MainWindow::createMenus() {
     fileMenu = new QMenu(tr("&File"));
     fileMenu->addAction(loadImagesAction);
+    fileMenu->addAction(openProjectAction);
+    fileMenu->addAction(saveProjectAction);
     fileMenu->addAction(mergeAction);
+    fileMenu->addAction(importMaskAction);
+    fileMenu->addAction(exportMaskAction);
     fileMenu->addSeparator();
     fileMenu->addAction(quitAction);
 
@@ -169,11 +220,17 @@ void MainWindow::createMenus() {
     editMenu->addAction(undoAction);
     editMenu->addAction(redoAction);
 
+    QMenu * viewMenu = new QMenu(tr("&View"));
+    viewMenu->addAction(fitPreviewAction);
+    viewMenu->addAction(maskOverlayAction);
+    viewMenu->addAction(clippingAction);
+
     helpMenu = new QMenu(tr("&Help"));
     helpMenu->addAction(aboutAction);
 
     menuBar()->addMenu(fileMenu);
     menuBar()->addMenu(editMenu);
+    menuBar()->addMenu(viewMenu);
     menuBar()->addMenu(helpMenu);
 }
 
@@ -199,6 +256,10 @@ void MainWindow::createToolbars() {
     toolBar->addSeparator();
     toolBar->addWidget(new QLabel(" " + tr("Brightness:"), toolBar));
     toolBar->addWidget(exposureSlider);
+    toolBar->addSeparator();
+    toolBar->addWidget(new QLabel(" " + tr("Zoom:"), toolBar));
+    toolBar->addWidget(zoomBox);
+    toolBar->addAction(fitPreviewAction);
     connect(toolActionGroup, SIGNAL(triggered(QAction *)), this, SLOT(toolSelected(QAction *)));
 
     layerSelector = addToolBar("Layers");
@@ -250,13 +311,16 @@ void MainWindow::loadImages() {
         progress.setWindowTitle(tr("Open raw images"));
         QFuture<int> error = QtConcurrent::run(std::function<int()>([&] () { return io.load(lod, progress); }));
         while (error.isRunning())
-            QApplication::instance()->processEvents(QEventLoop::ExcludeUserInputEvents);
+            QApplication::instance()->processEvents(QEventLoop::AllEvents);
         int result = error.result();
-        if (result < numImages * 2) {
+        if (result < 0) {
+            showTemporaryStatus(tr("Loading canceled."));
+        } else if (result < numImages * 2) {
             int i = result >> 1;
             QString message = result & 1 ?
             tr("File %1 has not the same format as the previous ones.").arg(lod.fileNames[i]) :
             tr("Unable to open file %1.").arg(lod.fileNames[i]);
+            if (!io.errorString().isEmpty()) message += "\n\n" + io.errorString();
             QMessageBox::warning(this, tr("Error opening file"), message);
         }
 
@@ -264,11 +328,26 @@ void MainWindow::loadImages() {
         // Create GUI
         preview->reload();
         mergeAction->setEnabled(numImages > 0);
+        importMaskAction->setEnabled(numImages > 0);
+        exportMaskAction->setEnabled(numImages > 0);
+        saveProjectAction->setEnabled(numImages > 0);
         addGhostAction->setEnabled(numImages > 1);
         rmGhostAction->setEnabled(numImages > 1);
         radiusSlider->setValue(50);
         exposureSlider->setValue(1000);
         createLayerSelector();
+        if (numImages > 0) {
+            if (!pendingMaskPath.isEmpty()) {
+                if (!io.loadMaskImage(pendingMaskPath)) {
+                    QMessageBox::warning(this, tr("Unable to restore project mask"), io.errorString());
+                } else {
+                    preview->reload();
+                }
+                pendingMaskPath.clear();
+            }
+            setStatus(tr("%1 exposures loaded. Review layer colors and red clipping warnings before saving.").arg(numImages));
+            fitPreview();
+        }
     }
     setToolFromKey();
 }
@@ -334,6 +413,7 @@ void MainWindow::saveResult() {
         QVariant lastDirSetting = settings.value("lastSaveDirectory");
         // Take the prefix and add the first and last suffix
         QString name = io.buildOutputFileName();
+        if (!suggestedOutputName.isEmpty()) name = io.replaceArguments(suggestedOutputName, "");
         if (!lastDirSetting.isNull()) {
             name = QDir(lastDirSetting.toString()).absolutePath() + "/" + QFileInfo(name).fileName();
         }
@@ -363,11 +443,103 @@ void MainWindow::saveResult() {
                     io.save(dpd, pd);
                 }));
                 while (result.isRunning())
-                    QApplication::instance()->processEvents(QEventLoop::ExcludeUserInputEvents);
+                    QApplication::instance()->processEvents(QEventLoop::AllEvents);
+                if (!io.errorString().isEmpty()) {
+                    QMessageBox::critical(this, tr("Error saving DNG"), io.errorString());
+                } else {
+                    showTemporaryStatus(tr("DNG saved successfully."));
+                }
             }
         }
     }
     setToolFromKey();
+}
+
+
+void MainWindow::importMask() {
+    const QString file = QFileDialog::getOpenFileName(this, tr("Import merge mask"), io.getInputPath(), tr("PNG images (*.png)"));
+    if (file.isEmpty()) return;
+    if (!io.loadMaskImage(file)) {
+        QMessageBox::warning(this, tr("Unable to import mask"), io.errorString());
+        return;
+    }
+    preview->reload();
+    showTemporaryStatus(tr("Mask imported."));
+}
+
+
+void MainWindow::exportMask() {
+    const QString file = QFileDialog::getSaveFileName(this, tr("Export merge mask"), io.getInputPath() + "/hdrmerge-mask.png", tr("PNG images (*.png)"));
+    if (file.isEmpty()) return;
+    if (!io.saveMaskImage(file)) {
+        QMessageBox::warning(this, tr("Unable to export mask"), io.errorString());
+        return;
+    }
+    showTemporaryStatus(tr("Mask exported."));
+}
+
+
+void MainWindow::fitPreview() {
+    const QSize image = preview->imageSize();
+    if (image.isEmpty()) return;
+    const QSize viewport = previewArea->viewport()->size();
+    const double sx = viewport.width() / static_cast<double>(image.width());
+    const double sy = viewport.height() / static_cast<double>(image.height());
+    zoomBox->setValue(qBound(10, qRound(std::min(sx, sy) * 100.0), 400));
+}
+
+
+void MainWindow::saveProject() {
+    QString projectPath = QFileDialog::getSaveFileName(this, tr("Save HDRMerge project"), io.getInputPath(), tr("HDRMerge projects (*.hdrmerge.json)"));
+    if (projectPath.isEmpty()) return;
+    if (!projectPath.endsWith(".hdrmerge.json", Qt::CaseInsensitive)) projectPath += ".hdrmerge.json";
+    const QString maskPath = projectPath + ".mask.png";
+    if (!io.saveMaskImage(maskPath)) {
+        QMessageBox::warning(this, tr("Unable to save project"), io.errorString());
+        return;
+    }
+    QJsonArray files;
+    for (const QString & file : io.sourceFileNames()) files.append(QFileInfo(file).absoluteFilePath());
+    QJsonObject root;
+    root["format"] = "HDRMerge experimental project";
+    root["version"] = 1;
+    root["files"] = files;
+    root["mask"] = QFileInfo(maskPath).fileName();
+    root["zoom"] = zoomBox->value();
+    QSaveFile project(projectPath);
+    if (!project.open(QIODevice::WriteOnly) || project.write(QJsonDocument(root).toJson(QJsonDocument::Indented)) < 0 || !project.commit()) {
+        QFile::remove(maskPath);
+        QMessageBox::warning(this, tr("Unable to save project"), tr("The project file could not be written."));
+        return;
+    }
+    showTemporaryStatus(tr("Project and mask saved."));
+}
+
+
+void MainWindow::openProject() {
+    const QString projectPath = QFileDialog::getOpenFileName(this, tr("Open HDRMerge project"), QString(), tr("HDRMerge projects (*.hdrmerge.json)"));
+    if (projectPath.isEmpty()) return;
+    QFile project(projectPath);
+    if (!project.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("Unable to open project"), tr("The project file could not be read."));
+        return;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(project.readAll(), &parseError);
+    if (document.isNull() || !document.isObject()) {
+        QMessageBox::warning(this, tr("Unable to open project"), parseError.errorString());
+        return;
+    }
+    const QJsonObject root = document.object();
+    preloadFiles.clear();
+    for (const QJsonValue & value : root["files"].toArray()) preloadFiles.push_back(value.toString());
+    if (preloadFiles.empty()) {
+        QMessageBox::warning(this, tr("Unable to open project"), tr("The project contains no source images."));
+        return;
+    }
+    pendingMaskPath = QFileInfo(projectPath).absoluteDir().filePath(root["mask"].toString());
+    zoomBox->setValue(root["zoom"].toInt(100));
+    loadImages();
 }
 
 

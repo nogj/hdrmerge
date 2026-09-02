@@ -39,7 +39,11 @@ public:
     ImageIO() {}
 
     int load(const LoadOptions & options, ProgressIndicator & progress);
-    void save(const SaveOptions & options, ProgressIndicator & progress);
+    bool save(const SaveOptions & options, ProgressIndicator & progress);
+    QString errorString() const { return lastError; }
+    bool saveMaskImage(const QString & maskFile);
+    bool loadMaskImage(const QString & maskFile);
+    std::vector<QString> sourceFileNames() const;
 
     const ImageStack & getImageStack() const {
         return stack;
@@ -69,8 +73,7 @@ public:
 private:
     ImageStack stack;
     std::vector<std::unique_ptr<RawParameters>> rawParameters;
-
-    void writeMaskImage(const QString & maskFile);
+    QString lastError;
 };
 
 } // namespace hdrmerge

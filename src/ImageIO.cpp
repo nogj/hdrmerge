@@ -26,6 +26,9 @@
 #include <QString>
 #include <QRegExp>
 #include <QFileInfo>
+#include <QFile>
+#include <QDir>
+#include <QCoreApplication>
 #include <libraw.h>
 #include "ImageIO.hpp"
 #include "DngFloatWriter.hpp"
@@ -47,7 +50,7 @@ Image ImageIO::loadRawImage(const QString& filename, RawParameters & rawParamete
         if (d.idata.filters <= 1000 && d.idata.filters != 9) {
             Log::msg(Log::DEBUG, "Unsupported filter array (", d.idata.filters, ").");
 #ifdef LIBRAW_DECODER_FLATFIELD
-        } else if (!decoder_info.decoder_flags & LIBRAW_DECODER_FLATFIELD) {
+        } else if (!(decoder_info.decoder_flags & LIBRAW_DECODER_FLATFIELD)) {
             Log::msg(Log::DEBUG, "LibRaw decoder is not flatfield (", ios::hex, decoder_info.decoder_flags, ").");
 #endif
         } else if (rawProcessor->unpack() != LIBRAW_SUCCESS) {
@@ -85,7 +88,12 @@ ImageIO::QDateInterval ImageIO::getImageCreationInterval(const QString & fileNam
 
 
 int ImageIO::load(const LoadOptions & options, ProgressIndicator & progress) {
+    lastError.clear();
     int numImages = options.fileNames.size();
+    if (numImages == 0) {
+        lastError = QCoreApplication::translate("LoadSave", "No input images were selected.");
+        return 0;
+    }
     int step;
     int p = 0;
     int error = 0, failedImage = 0;
@@ -99,11 +107,17 @@ int ImageIO::load(const LoadOptions & options, ProgressIndicator & progress) {
             int frameCount = getFrameCount(*params);
             step = 100 / (frameCount + 1);
             p = 0;
-            if(frameCount > 0 && frameCount <= 4) {
+            if(frameCount > 0 && frameCount <= 32) {
                 // framecount == 1 => create a dng from a single file with a single frame
                 // framecount == 2 => create a merged dng from a fuji exr file
                 // framecount == 3 => create a merged dng from a pentax hdr file
                 for (int i = 0; i < frameCount; ++i) {
+                    if (progress.isCanceled()) {
+                        lastError = QCoreApplication::translate("LoadSave", "Operation canceled.");
+                        stack.clear();
+                        rawParameters.clear();
+                        return -1;
+                    }
                     progress.advance(p, "Loading %1", name.toLocal8Bit().constData());
                     p += step;
                     unique_ptr<RawParameters> params(new RawParameters(name));
@@ -124,10 +138,21 @@ int ImageIO::load(const LoadOptions & options, ProgressIndicator & progress) {
                             rawParameters[j - 1].swap(rawParameters[j]);
                     }
                 }
+            } else {
+                error = 1;
+                lastError = frameCount > 32 ?
+                    QCoreApplication::translate("LoadSave", "The RAW contains too many frames.") :
+                    QCoreApplication::translate("LoadSave", "The RAW could not be opened or contains no image frames.");
             }
         } else {
             step = 100 / (numImages + 1);
             for (int i = 0; i < numImages; ++i) {
+                if (progress.isCanceled()) {
+                    lastError = QCoreApplication::translate("LoadSave", "Operation canceled.");
+                    stack.clear();
+                    rawParameters.clear();
+                    return -1;
+                }
                 const QString name = options.fileNames[i];
                 progress.advance(p, "Loading %1", name.toLocal8Bit().constData());
                 p += step;
@@ -152,6 +177,11 @@ int ImageIO::load(const LoadOptions & options, ProgressIndicator & progress) {
         }
     }
     if (error) {
+        if (lastError.isEmpty()) {
+            lastError = error == 2 ?
+                QCoreApplication::translate("LoadSave", "The selected images do not have the same RAW geometry or CFA pattern.") :
+                QCoreApplication::translate("LoadSave", "A RAW image could not be decoded.");
+        }
         stack.clear();
         rawParameters.clear();
         return (failedImage << 1) + error - 1;
@@ -159,6 +189,10 @@ int ImageIO::load(const LoadOptions & options, ProgressIndicator & progress) {
 
     progress.advance(p, "Processing stack");
 
+    if (rawParameters.empty() || stack.size() == 0) {
+        lastError = QCoreApplication::translate("LoadSave", "No usable RAW frames were loaded.");
+        return 0;
+    }
     RawParameters & params = *rawParameters.front();
     stack.setFlip(params.flip);
     if(options.useCustomWl)
@@ -172,13 +206,40 @@ int ImageIO::load(const LoadOptions & options, ProgressIndicator & progress) {
         }
     }
     stack.computeResponseFunctions();
-    stack.generateMask();
+    stack.generateMask(options.deghostThreshold);
     progress.advance(100, "Done loading!");
     return numImages << 1;
 }
 
 
-void ImageIO::save(const SaveOptions & options, ProgressIndicator & progress) {
+bool ImageIO::save(const SaveOptions & options, ProgressIndicator & progress) {
+    lastError.clear();
+    if (stack.size() == 0 || rawParameters.empty()) {
+        lastError = QCoreApplication::translate("LoadSave", "There is no HDR image to save.");
+        return false;
+    }
+    if (options.fileName.isEmpty()) {
+        lastError = QCoreApplication::translate("LoadSave", "No output file name was specified.");
+        return false;
+    }
+
+    const QFileInfo outputInfo(options.fileName);
+    const QString outputPath = outputInfo.absoluteFilePath();
+    for (const auto & input : rawParameters) {
+        if (QFileInfo(input->fileName).canonicalFilePath() == outputInfo.canonicalFilePath() ||
+            QFileInfo(input->fileName).absoluteFilePath() == outputPath) {
+            lastError = QCoreApplication::translate("LoadSave", "The output file cannot overwrite an input image.");
+            return false;
+        }
+    }
+    QDir outputDir = outputInfo.absoluteDir();
+    if (!outputDir.exists()) {
+        lastError = QCoreApplication::translate("LoadSave", "The output directory does not exist.");
+        return false;
+    }
+    const QString nonce = QString::number(QDateTime::currentMSecsSinceEpoch());
+    const QString temporaryPath = outputDir.filePath("." + outputInfo.fileName() + ".hdrmerge-" + nonce + ".tmp");
+    const QString backupPath = outputDir.filePath("." + outputInfo.fileName() + ".hdrmerge-" + nonce + ".bak");
     string cropped = stack.isCropped() ? " cropped" : "";
     Log::msg(2, "Writing ", options.fileName, ", ", options.bps, "-bit, ", stack.getWidth(), 'x', stack.getHeight(), cropped);
 
@@ -187,27 +248,62 @@ void ImageIO::save(const SaveOptions & options, ProgressIndicator & progress) {
     params.width = stack.getWidth();
     params.height = stack.getHeight();
     params.adjustWhite(stack.getImage(stack.size() - 1));
-    Array2D<float> composedImage = stack.compose(params, options.featherRadius);
+    Array2D<float> composedImage = stack.compose(params, options.featherRadius, options.averageSamples,
+                                                  options.preserveExposure);
+    params.black = params.maxBlack = 0;
+    std::fill_n(params.cblack, 4, 0);
+    if (progress.isCanceled()) {
+        lastError = QCoreApplication::translate("LoadSave", "Operation canceled.");
+        return false;
+    }
 
     progress.advance(33, "Rendering preview");
     QImage preview = renderPreview(composedImage, params, stack.getMaxExposure(), options.previewSize <= 1);
+    if (progress.isCanceled()) {
+        lastError = QCoreApplication::translate("LoadSave", "Operation canceled.");
+        return false;
+    }
 
     progress.advance(66, "Writing output");
     DngFloatWriter writer;
     writer.setBitsPerSample(options.bps);
     writer.setPreviewWidth((options.previewSize * stack.getWidth()) / 2);
     writer.setPreview(preview);
-    writer.write(std::move(composedImage), params, options.fileName);
+    if (!writer.write(std::move(composedImage), params, temporaryPath)) {
+        QFile::remove(temporaryPath);
+        lastError = QCoreApplication::translate("LoadSave", "The DNG writer failed while creating the output file.");
+        return false;
+    }
+    if (!QFileInfo(temporaryPath).exists() || QFileInfo(temporaryPath).size() == 0) {
+        QFile::remove(temporaryPath);
+        lastError = QCoreApplication::translate("LoadSave", "The DNG writer produced an empty output file.");
+        return false;
+    }
+    const bool hadOutput = QFileInfo(outputPath).exists();
+    if (hadOutput && !QFile::rename(outputPath, backupPath)) {
+        QFile::remove(temporaryPath);
+        lastError = QCoreApplication::translate("LoadSave", "The existing output file could not be replaced safely.");
+        return false;
+    }
+    if (!QFile::rename(temporaryPath, outputPath)) {
+        if (hadOutput) QFile::rename(backupPath, outputPath);
+        QFile::remove(temporaryPath);
+        lastError = QCoreApplication::translate("LoadSave", "The temporary DNG could not be moved into place.");
+        return false;
+    }
+    if (hadOutput) QFile::remove(backupPath);
     progress.advance(100, "Done writing!");
 
     if (options.saveMask) {
         QString name = replaceArguments(options.maskFileName, options.fileName);
-        writeMaskImage(name);
+        if (!saveMaskImage(name)) return false;
     }
+    return true;
 }
 
 
-void ImageIO::writeMaskImage(const QString & maskFile) {
+bool ImageIO::saveMaskImage(const QString & maskFile) {
+    lastError.clear();
     Log::debug("Saving mask to ", maskFile);
     EditableMask & mask = stack.getMask();
     QImage maskImage(mask.getWidth(), mask.getHeight(), QImage::Format_Indexed8);
@@ -223,8 +319,49 @@ void ImageIO::writeMaskImage(const QString & maskFile) {
         }
     }
     if (!maskImage.save(maskFile)) {
+        lastError = QCoreApplication::translate("LoadSave", "Cannot save the mask image.");
         Log::progress("Cannot save mask image to ", maskFile);
+        return false;
     }
+    return true;
+}
+
+
+bool ImageIO::loadMaskImage(const QString & maskFile) {
+    lastError.clear();
+    QImage source(maskFile);
+    if (source.isNull()) {
+        lastError = QCoreApplication::translate("LoadSave", "Cannot open the mask image.");
+        return false;
+    }
+    EditableMask & target = stack.getMask();
+    if (source.width() != static_cast<int>(target.getWidth()) ||
+        source.height() != static_cast<int>(target.getHeight())) {
+        lastError = QCoreApplication::translate("LoadSave", "The mask dimensions do not match the current image.");
+        return false;
+    }
+    const int maxLayer = static_cast<int>(stack.size()) - 1;
+    for (int y = 0; y < source.height(); ++y) {
+        for (int x = 0; x < source.width(); ++x) {
+            int layer;
+            if (source.format() == QImage::Format_Indexed8) {
+                layer = source.pixelIndex(x, y);
+            } else {
+                layer = maxLayer > 0 ? (qGray(source.pixel(x, y)) * maxLayer + 127) / 255 : 0;
+            }
+            target(x, y) = std::max(0, std::min(maxLayer, layer));
+        }
+    }
+    target.reset();
+    return true;
+}
+
+
+std::vector<QString> ImageIO::sourceFileNames() const {
+    std::vector<QString> files;
+    files.reserve(rawParameters.size());
+    for (const auto & parameters : rawParameters) files.push_back(parameters->fileName);
+    return files;
 }
 
 
@@ -337,6 +474,19 @@ public:
         return name.mid(pos + 1);
     }
 
+    QString getCommonPrefix() const {
+        if (names.empty()) return QString();
+        QString prefix = QFileInfo(names.front()).completeBaseName();
+        for (size_t i = 1; i < names.size() && !prefix.isEmpty(); ++i) {
+            const QString candidate = QFileInfo(names[i]).completeBaseName();
+            int common = 0;
+            while (common < prefix.length() && common < candidate.length() && prefix[common] == candidate[common]) ++common;
+            prefix.truncate(common);
+        }
+        while (prefix.endsWith('_') || prefix.endsWith('-') || prefix.endsWith(' ')) prefix.chop(1);
+        return prefix;
+    }
+
     static QString getBaseName(const QString & name) {
         return QFileInfo(name).fileName();
     }
@@ -372,9 +522,9 @@ QString ImageIO::replaceArguments(const QString & pattern, const QString & outFi
     QString result(pattern);
     QRegExp re;
     if (outFileName == "") {
-        re = QRegExp("%(?:i[fFdn]\\[(-?[0-9]+)\\]|%)");
+        re = QRegExp("%(?:i[fFdn]\\[(-?[0-9]+)\\]|cf|%)");
     } else {
-        re = QRegExp("%(?:o[fd]|i[fFdn]\\[(-?[0-9]+)\\]|%)");
+        re = QRegExp("%(?:o[fd]|i[fFdn]\\[(-?[0-9]+)\\]|cf|%)");
     }
     int index = 0;
     FileNameManipulator fnm(rawParameters);
@@ -383,6 +533,8 @@ QString ImageIO::replaceArguments(const QString & pattern, const QString & outFi
         QString token = re.cap();
         if (token[1] == '%') {
             result.replace(index, 2, '%');
+        } else if (token.mid(1) == "cf") {
+            result.replace(index, 3, fnm.getCommonPrefix());
         } else if (token[1] == 'o') {
             if (token[2] == 'f') {
                 result.replace(index, 3, fnm.getBaseName(outFileName));

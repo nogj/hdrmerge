@@ -87,6 +87,20 @@ LoadOptionsDialog::LoadOptionsDialog(QWidget * parent, Qt::WindowFlags f)
     customWhiteLevelSpinBox->setToolTip(tr("Custom white level."));
     layout->addWidget(customWhiteLevelSpinBox, 0);
 
+    autoDeghostBox = new QCheckBox(tr("Automatically reduce moving-object ghosts."), this);
+    autoDeghostBox->setChecked(settings.value("autoDeghostOnLoad", false).toBool());
+    autoDeghostBox->setToolTip(tr("Experimental: selects the reference exposure where normalized pixels disagree."));
+    layout->addWidget(autoDeghostBox, 0);
+
+    deghostThresholdSpinBox = new QSpinBox(this);
+    deghostThresholdSpinBox->setRange(1, 100);
+    deghostThresholdSpinBox->setSuffix(" %");
+    deghostThresholdSpinBox->setValue(settings.value("deghostThresholdOnLoad", 12).toInt());
+    deghostThresholdSpinBox->setEnabled(autoDeghostBox->isChecked());
+    deghostThresholdSpinBox->setToolTip(tr("Lower values detect more motion but can select noisier pixels."));
+    connect(autoDeghostBox, SIGNAL(toggled(bool)), deghostThresholdSpinBox, SLOT(setEnabled(bool)));
+    layout->addWidget(deghostThresholdSpinBox, 0);
+
     QWidget * buttons = new QWidget(this);
     QHBoxLayout * buttonsLayout = new QHBoxLayout(buttons);
     QPushButton * acceptButton = new QPushButton(tr("Accept"), this);
@@ -120,7 +134,7 @@ void LoadOptionsDialog::addFiles() {
     "*.3fr "
     "*.ari *.arw "
     "*.bay "
-    "*.crw *.cr2 *.cap "
+    "*.crw *.cr2 *.cr3 *.cap "
     "*.dcs *.dcr *.dng *.drf "
     "*.eip *.erf "
     "*.fff "
@@ -132,8 +146,8 @@ void LoadOptionsDialog::addFiles() {
     "*.pef *.ptx *.pxn "
     "*.r3d *.raf *.raw *.rwl *.rw2 *.rwz "
     "*.sr2 *.srf *.srw "
-    "*.x3f"
-    ")"));
+    "*.x3f *.gpr *.qtk"
+    ");;All files (*.*)"));
 
 
     QFileDialog loadDialog(this, tr("Select raw photos"), lastDirSetting.isNull() ? QDir::currentPath() : QDir(lastDirSetting.toString()).absolutePath(), filter);
@@ -173,6 +187,9 @@ void LoadOptionsDialog::accept() {
     settings.setValue("useCustomWlOnLoad", useCustomWl);
     customWl = customWhiteLevelSpinBox->value();
     settings.setValue("customWlOnLoad", customWl);
+    deghostThreshold = autoDeghostBox->isChecked() ? deghostThresholdSpinBox->value() : 0;
+    settings.setValue("autoDeghostOnLoad", autoDeghostBox->isChecked());
+    settings.setValue("deghostThresholdOnLoad", deghostThresholdSpinBox->value());
     for (int i = 0; i < fileList->count(); ++i) {
         fileNames.push_back(fileList->item(i)->data(Qt::UserRole).toString());
     }

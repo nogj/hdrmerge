@@ -27,7 +27,9 @@ namespace hdrmerge {
 
 class ProgressIndicator {
 public:
+    virtual ~ProgressIndicator() {}
     virtual void advance(int percent, const char * message, const char * arg = nullptr) = 0;
+    virtual bool isCanceled() const { return false; }
 };
 
 } // namespace hdrmerge

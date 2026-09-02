@@ -47,8 +47,9 @@ public:
     void align();
     void crop();
     void computeResponseFunctions();
-    void generateMask();
-    Array2D<float> compose(const RawParameters & md, int featherRadius) const;
+    void generateMask(int deghostThreshold = 0);
+    Array2D<float> compose(const RawParameters & md, int featherRadius, bool averageSamples = false,
+                           bool preserveExposure = false) const;
 
     size_t size() const { return images.size(); }
 
@@ -83,6 +84,10 @@ public:
     EditableMask & getMask() {
         return mask;
     }
+    const EditableMask & getMask() const {
+        return mask;
+    }
+    uint16_t getSaturationThreshold() const { return satThreshold; }
 
     double value(size_t x, size_t y) const;
 

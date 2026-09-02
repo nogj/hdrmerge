@@ -104,6 +104,16 @@ DngPropertiesDialog::DngPropertiesDialog(QWidget * parent, Qt::WindowFlags f)
     formLayout->addRow(tr("Bits per sample:"), bpsSelector);
     formLayout->addRow(tr("Preview size:"), previewSelector);
     formLayout->addRow(tr("Mask blur radius:"), radiusSelector);
+
+    averageSamplesBox = new QCheckBox(tr("Average valid exposures to reduce noise (experimental)"), this);
+    averageSamplesBox->setChecked(averageSamples);
+    averageSamplesBox->setToolTip(tr("May create ghosts when subjects moved. Leave disabled for normal brackets."));
+    formLayout->addRow(tr("Noise reduction:"), averageSamplesBox);
+
+    preserveExposureBox = new QCheckBox(tr("Preserve absolute exposure across bracketed sets"), this);
+    preserveExposureBox->setChecked(preserveExposure);
+    preserveExposureBox->setToolTip(tr("Recommended when creating panoramas from several HDR sets."));
+    formLayout->addRow(tr("Batch consistency:"), preserveExposureBox);
     formLayout->addRow(tr("Mask image:"), saveMaskFile);
     formLayout->addRow("", maskFileSelector);
     formWidget->setLayout(formLayout);
@@ -129,6 +139,8 @@ DngPropertiesDialog::DngPropertiesDialog(QWidget * parent, Qt::WindowFlags f)
 
 
 void DngPropertiesDialog::accept() {
+    averageSamples = averageSamplesBox->isChecked();
+    preserveExposure = preserveExposureBox->isChecked();
     saveMask = maskFileSelector->isEnabled();
     maskFileName = QDir::toNativeSeparators(maskFileEditor->text()).toLocal8Bit().constData();
     if (saveOptions->isChecked()) {
@@ -138,6 +150,8 @@ void DngPropertiesDialog::accept() {
         settings.setValue("saveMask", saveMask);
         settings.setValue("maskFileName", maskFileName);
         settings.setValue("featherRadius", featherRadius);
+        settings.setValue("averageSamples", averageSamples);
+        settings.setValue("preserveExposure", preserveExposure);
     }
     QDialog::accept();
 }
@@ -148,6 +162,8 @@ void DngPropertiesDialog::loadDefaultOptions() {
     bps = settings.value("bps", 16).toInt();
     previewSize = settings.value("previewSize", 2).toInt();
     saveMask = settings.value("saveMask", false).toBool();
+    averageSamples = settings.value("averageSamples", false).toBool();
+    preserveExposure = settings.value("preserveExposure", false).toBool();
     maskFileName = settings.value("maskFileName", "%od/%of_mask.png").toString().toLocal8Bit().constData();
     featherRadius = settings.value("featherRadius", 3).toInt();
 }

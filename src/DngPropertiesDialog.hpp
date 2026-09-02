@@ -58,6 +58,8 @@ private:
     QLineEdit * maskFileEditor;
     QWidget * maskFileSelector;
     QCheckBox * saveOptions;
+    QCheckBox * averageSamplesBox;
+    QCheckBox * preserveExposureBox;
 };
 
 } // namespace hdrmerge

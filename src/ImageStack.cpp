@@ -21,6 +21,7 @@
  */
 
 #include <algorithm>
+#include <limits>
 
 #include "BoxBlur.hpp"
 #include "ImageStack.hpp"
@@ -104,11 +105,17 @@ void ImageStack::calculateSaturationLevel(const RawParameters & params, bool use
     }
 
 
-    uint16_t maxPerColors = std::max(maxPerColor[0], std::max(maxPerColor[1],std::max(maxPerColor[2], maxPerColor[3])));
-    satThreshold = params.max == 0 ? maxPerColors : params.max;
+    uint16_t maxPerColors = 0;
+    uint16_t channelSafeMax = std::numeric_limits<uint16_t>::max();
+    for (int c = 0; c < params.colors; ++c) {
+        maxPerColors = std::max(maxPerColors, maxPerColor[c]);
+        if (maxPerColor[c] > 0) channelSafeMax = std::min(channelSafeMax, maxPerColor[c]);
+    }
+    if (channelSafeMax == std::numeric_limits<uint16_t>::max()) channelSafeMax = maxPerColors;
+    satThreshold = params.max == 0 ? channelSafeMax : std::min(params.max, channelSafeMax);
 
     if(maxPerColors > 0) {
-        satThreshold = std::min(satThreshold, maxPerColors);
+        satThreshold = std::min(satThreshold, channelSafeMax);
     }
 
     if (!useCustomWl) { // only scale when no custom white level was specified
@@ -131,14 +138,14 @@ void ImageStack::align() {
         for (size_t i = 0; i < images.size(); ++i) {
             images[i].preScale();
         }
+        const size_t reference = images.size() - 1;
         #pragma omp parallel for schedule(dynamic)
-        for (size_t i = 0; i < images.size() - 1; ++i) {
-            errors[i] = images[i].alignWith(images[i + 1]);
+        for (size_t i = 0; i < reference; ++i) {
+            errors[i] = images[i].alignWith(images[reference]);
         }
-        for (size_t i = images.size() - 1; i > 0; --i) {
-            images[i - 1].displace(images[i].getDeltaX(), images[i].getDeltaY());
-            Log::debug("Image ", i - 1, " displaced to (", images[i - 1].getDeltaX(),
-                       ", ", images[i - 1].getDeltaY(), ") with error ", errors[i - 1]);
+        for (size_t i = 0; i < reference; ++i) {
+            Log::debug("Image ", i, " aligned to common reference at (", images[i].getDeltaX(),
+                       ", ", images[i].getDeltaY(), ") with error ", errors[i]);
         }
         for (auto & i : images) {
             i.releaseAlignData();
@@ -172,7 +179,7 @@ void ImageStack::computeResponseFunctions() {
 }
 
 
-void ImageStack::generateMask() {
+void ImageStack::generateMask(int deghostThreshold) {
     Timer t("Generate mask");
     mask.resize(width, height);
     if(images.size() == 1) {
@@ -188,6 +195,18 @@ void ImageStack::generateMask() {
                     (!images[i].contains(x, y) ||
                     images[i].isSaturatedAround(x, y))) ++i;
                 mask(x, y) = i;
+                if (deghostThreshold > 0 && i < images.size() - 1) {
+                    const size_t reference = images.size() - 1;
+                    if (images[reference].contains(x, y)) {
+                        const double a = images[i].exposureAt(x, y);
+                        const double b = images[reference].exposureAt(x, y);
+                        const double scale = std::max(1.0, std::max(std::abs(a), std::abs(b)));
+                        const double difference = 100.0 * std::abs(a - b) / scale;
+                        if (difference >= deghostThreshold) {
+                            mask(x, y) = reference;
+                        }
+                    }
+                }
             }
         }
     }
@@ -394,7 +413,8 @@ static Array2D<uint8_t> fattenMask(const Array2D<uint8_t> & mask, int radius) {
 }
 #endif
 
-Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadius) const {
+Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadius, bool averageSamples,
+                                   bool preserveExposure) const {
     int imageMax = images.size() - 1;
     BoxBlur map(fattenMask(mask, featherRadius));
     measureTime("Blur", [&] () {
@@ -445,6 +465,20 @@ Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadi
                     p = 0.0;
                 }
                 v -= p * (v - vv);
+                if (averageSamples && p < 0.0001) {
+                    double weighted = 0.0;
+                    double weights = 0.0;
+                    const size_t firstValid = std::max<size_t>(j, origMask(x, y));
+                    for (size_t k = firstValid; k < images.size(); ++k) {
+                        if (!images[k].contains(x, y) || images[k].isSaturatedAround(x, y)) continue;
+                        // Shot-noise variance falls as the captured signal grows, so
+                        // favour the brightest non-clipped sample at this CFA pixel.
+                        const double weight = std::max(1.0, static_cast<double>(images[k](x, y)));
+                        weighted += images[k].exposureAt(x, y) * weight;
+                        weights += weight;
+                    }
+                    if (weights > 0.0) v = weighted / weights;
+                }
                 dst(x, y) = v;
                 if (v > maxthr) {
                     maxthr = v;
@@ -459,12 +493,11 @@ Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadi
 
     dst.displace(params.leftMargin, params.topMargin);
     // Scale to params.max and recover the black levels
-    float mult = (params.max - params.maxBlack) / max;
+    float mult = preserveExposure ? params.max / 65535.0f : (max > 0.0f ? params.max / max : 1.0f);
     #pragma omp parallel for
     for (size_t y = 0; y < params.rawHeight; ++y) {
         for (size_t x = 0; x < params.rawWidth; ++x) {
             dst(x, y) *= mult;
-            dst(x, y) += params.blackAt(x - params.leftMargin, y - params.topMargin);
         }
     }
 

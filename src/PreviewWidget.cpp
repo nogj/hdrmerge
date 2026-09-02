@@ -28,6 +28,7 @@
 #include <QApplication>
 #include <QBitmap>
 #include <QAction>
+#include <algorithm>
 #include "Log.hpp"
 using namespace hdrmerge;
 
@@ -35,6 +36,9 @@ using namespace hdrmerge;
 PreviewWidget::PreviewWidget(ImageStack & s, QWidget * parent) : QWidget(parent), stack(s),
 width(0), height(0), flip(0), addPixels(false), rmPixels(false), layer(0), radius(5),
 mouseX(0), mouseY(0), expMult(1.0), cancelRender(false) {
+    zoomFactor = 1.0;
+    showMaskOverlay = true;
+    showClipping = true;
     float g = 1.0f / 2.2f;
     for (int i = 0; i < 65536; i++) {
         gamma[i] = (int)std::floor(65536.0f * std::pow(i / 65536.0f, g)) >> 8;
@@ -90,13 +94,14 @@ void PreviewWidget::rotate(int & x, int & y) const {
 
 
 QSize PreviewWidget::sizeHint() const {
-    return pixmap.get() ? pixmap->size() : QSize(0, 0);
+    return pixmap.get() ? QSize(qRound(pixmap->width() * zoomFactor), qRound(pixmap->height() * zoomFactor)) : QSize(0, 0);
 }
 
 
 void PreviewWidget::paintEvent(QPaintEvent * event) {
     if (pixmap.get()) {
         QPainter painter(this);
+        painter.scale(zoomFactor, zoomFactor);
         painter.drawPixmap(0, 0, *pixmap);
         if ((addPixels || rmPixels) && underMouse()) {
             painter.drawPixmap(mouseX - radius, mouseY - radius, brush);
@@ -128,10 +133,26 @@ QRgb PreviewWidget::getColor(int layer, int v) {
 
 QRgb PreviewWidget::rgb(int col, int row) const {
     rotate(col, row);
+    const int selectedLayer = stack.getImageAt(col, row);
     int v = (int)stack.value(col, row) * expMult;
     if (v < 0) v = 0;
     else if (v > 65535) v = 65535;
-    return getColor(stack.getImageAt(col, row), gamma[v]);
+    const int displayValue = gamma[v];
+    if (showClipping && stack.getImage(selectedLayer).isSaturatedAround(col, row)) {
+        return qRgb(255, displayValue / 4, displayValue / 4);
+    }
+    if (!showMaskOverlay) return qRgb(displayValue, displayValue, displayValue);
+    return getColor(selectedLayer, displayValue);
+}
+
+
+void PreviewWidget::setZoomPercent(int percent) {
+    percent = std::max(10, std::min(400, percent));
+    zoomFactor = percent / 100.0;
+    resize(sizeHint());
+    updateGeometry();
+    update();
+    emit zoomChanged(percent);
 }
 
 
@@ -159,12 +180,12 @@ void PreviewWidget::paintImage(QPoint where, const QImage & image) {
     if (!pixmap.get()) {
         pixmap.reset(new QPixmap);
         *pixmap = QPixmap::fromImage(image);
-        resize(pixmap->size());
+        resize(sizeHint());
     } else {
         QPainter painter(pixmap.get());
         painter.drawImage(where, image);
     }
-    update(where.x(), where.y(), image.width(), image.height());
+    update();
 }
 
 
@@ -197,7 +218,8 @@ void PreviewWidget::setShowBrush() {
 
 
 void PreviewWidget::mouseEvent(QMouseEvent * event, bool pressed) {
-    int rx = mouseX = event->x(), ry = mouseY = event->y();
+    int rx = mouseX = static_cast<int>(event->x() / zoomFactor);
+    int ry = mouseY = static_cast<int>(event->y() / zoomFactor);
     rotate(rx, ry);
     if (rx >= 0 && rx < (int)stack.getWidth() && ry >= 0 && ry < (int)stack.getHeight())
         emit pixelUnderMouse(rx, ry);
@@ -223,6 +245,10 @@ void PreviewWidget::wheelEvent(QWheelEvent * event) {
         if (step == 0) step = event->angleDelta().y() > 0 ? 1 : -1;
         setRadius(radius - step);
         emit radiusChanged(radius);
+    } else if (mods & Qt::ControlModifier) {
+        event->accept();
+        const int direction = event->angleDelta().y() >= 0 ? 1 : -1;
+        setZoomPercent(qRound(zoomFactor * 100.0) + direction * 10);
     } else {
         event->ignore();
     }

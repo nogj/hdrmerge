@@ -38,6 +38,7 @@ public:
 
     PreviewWidget(ImageStack & s, QWidget * parent);
     QSize sizeHint() const;
+    QSize imageSize() const { return QSize(static_cast<int>(width), static_cast<int>(height)); }
 
     static QRgb getColor(int layer, int v);
 
@@ -64,11 +65,15 @@ public slots:
             repaintAsync();
         }
     }
+    void setZoomPercent(int percent);
+    void setShowMaskOverlay(bool enabled) { showMaskOverlay = enabled; update(); }
+    void setShowClipping(bool enabled) { showClipping = enabled; update(); }
     void undo();
     void redo();
 
 signals:
     void radiusChanged(int r);
+    void zoomChanged(int percent);
     void pixelUnderMouse(int x, int y);
 
 protected:
@@ -96,6 +101,9 @@ private:
     int mouseX, mouseY;
     QPixmap brush;
     double expMult;
+    double zoomFactor;
+    bool showMaskOverlay;
+    bool showClipping;
     QFuture<void> currentRender;
     bool cancelRender;
     uint8_t gamma[65536];

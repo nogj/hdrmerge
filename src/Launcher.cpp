@@ -39,7 +39,7 @@ using namespace std;
 
 namespace hdrmerge {
 
-Launcher::Launcher(int argc, char * argv[]) : argc(argc), argv(argv), help(false) {
+Launcher::Launcher(int argc, char * argv[]) : argc(argc), argv(argv), help(false), forceGui(false), forceNoGui(false) {
     Log::setOutputStream(cout);
     saveOptions.previewSize = 2;
 }
@@ -50,6 +50,7 @@ int Launcher::startGUI() {
     // Create main window
     MainWindow mw;
     mw.preload(generalOptions.fileNames);
+    mw.setSuggestedOutputName(saveOptions.fileName);
     mw.show();
     QMetaObject::invokeMethod(&mw, "loadImages", Qt::QueuedConnection);
 
@@ -88,7 +89,10 @@ list<LoadOptions> Launcher::getBracketedSets() {
     dateNames.sort();
     ImageIO::QDateInterval lastInterval;
     for (auto & dateName : dateNames) {
-        if (lastInterval.start.isNull() || lastInterval.difference(dateName.first) > generalOptions.batchGap) {
+        const bool reachedBracketSize = generalOptions.bracketSize > 0 && !result.empty() &&
+            static_cast<int>(result.back().fileNames.size()) >= generalOptions.bracketSize;
+        if (lastInterval.start.isNull() || reachedBracketSize ||
+            lastInterval.difference(dateName.first) > generalOptions.batchGap) {
             result.push_back(generalOptions);
             result.back().fileNames.clear();
         }
@@ -124,14 +128,14 @@ int Launcher::automaticMerge() {
         }
         CoutProgressIndicator progress;
         int numImages = options.fileNames.size();
-        int result = io.load(options, progress);
-        if (result < numImages * 2) {
-            int format = result & 1;
-            int i = result >> 1;
+        int loadResult = io.load(options, progress);
+        if (loadResult < 0 || loadResult < numImages * 2) {
+            int format = loadResult >= 0 ? loadResult & 1 : 0;
+            int i = loadResult >= 0 ? loadResult >> 1 : 0;
             if (format) {
                 cerr << tr("Error loading %1, it has a different format.").arg(options.fileNames[i]) << endl;
             } else {
-                cerr << tr("Error loading %1, file not found.").arg(options.fileNames[i]) << endl;
+                cerr << io.errorString() << endl;
             }
             result = 1;
             continue;
@@ -147,7 +151,10 @@ int Launcher::automaticMerge() {
             setOptions.fileName = io.buildOutputFileName();
         }
         Log::progress(tr("Writing result to %1").arg(setOptions.fileName));
-        io.save(setOptions, progress);
+        if (!io.save(setOptions, progress)) {
+            cerr << io.errorString() << endl;
+            result = 1;
+        }
     }
     return result;
 }
@@ -177,6 +184,30 @@ void Launcher::parseCommandLine() {
             generalOptions.batch = true;
         } else if (string("--single") == argv[i]) {
             generalOptions.withSingles = true;
+        } else if (string("--gui") == argv[i]) {
+            forceGui = true;
+        } else if (string("--nogui") == argv[i]) {
+            forceNoGui = true;
+        } else if (string("--average") == argv[i]) {
+            saveOptions.averageSamples = true;
+        } else if (string("--preserve-exposure") == argv[i]) {
+            saveOptions.preserveExposure = true;
+        } else if (string("--deghost") == argv[i]) {
+            if (++i < argc) {
+                try {
+                    generalOptions.deghostThreshold = std::max(1, std::min(100, stoi(argv[i])));
+                } catch (std::exception &) {
+                    cerr << tr("Invalid %1 parameter, using default.").arg(argv[i - 1]) << endl;
+                }
+            }
+        } else if (string("--bracket-size") == argv[i]) {
+            if (++i < argc) {
+                try {
+                    generalOptions.bracketSize = std::max(0, stoi(argv[i]));
+                } catch (std::exception &) {
+                    cerr << tr("Invalid %1 parameter, using default.").arg(argv[i - 1]) << endl;
+                }
+            }
         } else if (string("--help") == argv[i]) {
             help = true;
         } else if (string("-b") == argv[i]) {
@@ -255,11 +286,15 @@ void Launcher::showHelp() {
     cout << "    " << "              - %in[n]: " << tr("Replaced by the numerical suffix of image n, if it exists.") << endl;
     cout << "    " << "                " << tr("For instance, in IMG_1234.CR2, the numerical suffix would be 1234.") << endl;
     cout << "    " << "              - %%: " << tr("Replaced by a single %.") << endl;
+    cout << "    " << "              - %cf: " << tr("Replaced by the common prefix of all input file names.") << endl;
     cout << "    " << "-a            " << tr("Calculates the output file name as") << " %id[-1]/%iF[0]-%in[-1].dng." << endl;
     cout << "    " << "-B|--batch    " << tr("Batch mode: Input images are automatically grouped into bracketed sets,") << endl;
     cout << "    " << "              " << tr("by comparing the creation time. Implies -a if no output file name is given.") << endl;
     cout << "    " << "-g gap        " << tr("Batch gap, maximum difference in seconds between two images of the same set.") << endl;
     cout << "    " << "--single      " << tr("Include single images in batch mode (the default is to skip them.)") << endl;
+    cout << "    " << "--bracket-size N " << tr("Start a new batch group after N images (0 means automatic).") << endl;
+    cout << "    " << "--gui         " << tr("Force the graphical interface even when -o is present.") << endl;
+    cout << "    " << "--nogui       " << tr("Force command-line mode.") << endl;
     cout << "    " << "-b BPS        " << tr("Bits per sample, can be 16, 24 or 32.") << endl;
     cout << "    " << "--no-align    " << tr("Do not auto-align source images.") << endl;
     cout << "    " << "--no-crop     " << tr("Do not crop the output image to the optimum size.") << endl;
@@ -268,6 +303,9 @@ void Launcher::showHelp() {
     cout << "    " << "              - %of: " << tr("Replaced by the base file name of the output file.") << endl;
     cout << "    " << "              - %od: " << tr("Replaced by the directory name of the output file.") << endl;
     cout << "    " << "-r radius     " << tr("Mask blur radius, to soften transitions between images. Default is 3 pixels.") << endl;
+    cout << "    " << "--deghost N   " << tr("Experimental motion detection threshold from 1 to 100 percent.") << endl;
+    cout << "    " << "--average     " << tr("Average valid exposures for additional noise reduction.") << endl;
+    cout << "    " << "--preserve-exposure " << tr("Keep consistent output exposure across bracketed sets.") << endl;
     cout << "    " << "-p size       " << tr("Preview size. Can be full, half or none.") << endl;
     cout << "    " << "-v            " << tr("Verbose mode.") << endl;
     cout << "    " << "-vv           " << tr("Debug mode.") << endl;
@@ -296,16 +334,19 @@ bool Launcher::checkGUI() {
             numFiles++;
         }
     }
+    if (forceGui) return true;
+    if (forceNoGui) return false;
     return useGUI || numFiles == 0;
 }
 
 
 int Launcher::run() {
+    parseCommandLine();
 #ifndef NO_GUI
     bool useGUI = checkGUI();
 #else
     bool useGUI = false;
-    help = checkGUI();
+    if (generalOptions.fileNames.empty()) help = true;
 #endif
     QApplication app(argc, argv, useGUI);
 
@@ -323,7 +364,6 @@ int Launcher::run() {
     appTranslator.load("hdrmerge_" + QLocale::system().name(), ":/translators");
     app.installTranslator(&appTranslator);
 
-    parseCommandLine();
     Log::debug("Using LibRaw ", libraw_version());
 
     if (help) {
