@@ -122,7 +122,7 @@ int Launcher::automaticMerge() {
     ImageIO io;
     int result = 0;
     for (LoadOptions & options : optionsSet) {
-        if (!options.withSingles && options.fileNames.size() == 1) {
+        if (generalOptions.batch && !options.withSingles && options.fileNames.size() == 1) {
             Log::progress(tr("Skipping single image %1").arg(options.fileNames.front()));
             continue;
         }
