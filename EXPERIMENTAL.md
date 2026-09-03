@@ -37,3 +37,14 @@ CLI additions:
 
 Always retain backups of source RAW files. The program prevents direct output
 collisions, but this branch still needs validation across a broad camera set.
+
+## Known limitations
+
+- Registration is still integer-pixel, but now aligns every frame against one
+  common reference. True subpixel/affine registration would require a CFA-safe
+  resampling design and broader camera validation.
+- Linear DNG input is not yet supported as a separate RGB processing path.
+- The DNG writer still renders the complete output in memory; very large or
+  numerous files can therefore require substantial RAM.
+- Deghosting and exposure averaging are intentionally opt-in and should be
+  checked visually for every camera and scene type.
