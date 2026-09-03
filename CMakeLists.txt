@@ -364,7 +364,7 @@ if(BUILD_TESTING AND OpenCV_FOUND)
         src/CfaAlignment.cpp
     )
     target_include_directories(test-cfa-alignment PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_link_libraries(test-cfa-alignment ${OpenCV_LIBS})
+    target_link_libraries(test-cfa-alignment ${OpenCV_LIBS} Qt5::Core)
     add_test(NAME cfa-alignment COMMAND test-cfa-alignment)
 endif()
 
