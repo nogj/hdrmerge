@@ -244,6 +244,8 @@ void ImageStack::computeResponseFunctions() {
 void ImageStack::generateMask(int deghostThreshold) {
     Timer t("Generate mask");
     mask.resize(width, height);
+    motionMask.resize(width, height);
+    std::fill_n(&motionMask[0], width*height, 0);
     if(images.size() == 1) {
         // single image, fill in zero values
         std::fill_n(&mask[0], width*height, 0);
@@ -264,12 +266,66 @@ void ImageStack::generateMask(int deghostThreshold) {
                         const double b = images[reference].exposureAt(x, y);
                         const double scale = std::max(1.0, std::max(std::abs(a), std::abs(b)));
                         const double difference = 100.0 * std::abs(a - b) / scale;
-                        if (difference >= deghostThreshold) {
-                            mask(x, y) = reference;
-                        }
+                        // In deep shadows, ordinary shot/read noise can be a large
+                        // percentage of the signal. Requiring a small signal-aware
+                        // floor avoids turning that noise into a salt-and-pepper mask.
+                        const double noiseFloor = 100.0 * 4.0 * std::sqrt(scale) / scale;
+                        if (difference >= std::max<double>(deghostThreshold, noiseFloor))
+                            motionMask(x, y) = 1;
                     }
                 }
             }
+        }
+
+        if (deghostThreshold > 0) {
+            // Enforce spatial support independently on each Bayer plane. A 3x3
+            // neighbourhood with a stride of two never mixes CFA colours.
+            Array2D<uint8_t> supported(width, height);
+            std::fill_n(&supported[0], width*height, 0);
+            #pragma omp parallel for schedule(dynamic)
+            for (size_t y = 0; y < height; ++y) {
+                for (size_t x = 0; x < width; ++x) {
+                    int votes = 0;
+                    for (int oy = -2; oy <= 2; oy += 2) {
+                        const int yy = static_cast<int>(y) + oy;
+                        if (yy < 0 || yy >= static_cast<int>(height)) continue;
+                        for (int ox = -2; ox <= 2; ox += 2) {
+                            const int xx = static_cast<int>(x) + ox;
+                            if (xx >= 0 && xx < static_cast<int>(width) && motionMask(xx, yy)) ++votes;
+                        }
+                    }
+                    supported(x, y) = votes >= 3 ? 1 : 0;
+                }
+            }
+
+            // Grow the supported core by one same-colour CFA sample. This covers
+            // antialiased motion boundaries without bleeding between CFA planes.
+            Array2D<uint8_t> coherent(width, height);
+            std::fill_n(&coherent[0], width*height, 0);
+            #pragma omp parallel for schedule(dynamic)
+            for (size_t y = 0; y < height; ++y) {
+                for (size_t x = 0; x < width; ++x) {
+                    bool moving = false;
+                    for (int oy = -2; oy <= 2 && !moving; oy += 2) {
+                        const int yy = static_cast<int>(y) + oy;
+                        if (yy < 0 || yy >= static_cast<int>(height)) continue;
+                        for (int ox = -2; ox <= 2; ox += 2) {
+                            const int xx = static_cast<int>(x) + ox;
+                            if (xx >= 0 && xx < static_cast<int>(width) && supported(xx, yy)) {
+                                moving = true;
+                                break;
+                            }
+                        }
+                    }
+                    coherent(x, y) = moving ? 1 : 0;
+                }
+            }
+            motionMask = std::move(coherent);
+            const uint8_t reference = static_cast<uint8_t>(images.size() - 1);
+            #pragma omp parallel for schedule(dynamic)
+            for (size_t y = 0; y < height; ++y)
+                for (size_t x = 0; x < width; ++x)
+                    if (motionMask(x, y) && images[reference].contains(x, y)) mask(x, y) = reference;
         }
     }
     // The mask can be used in compose to get the information about saturated pixels
@@ -475,82 +531,168 @@ static Array2D<uint8_t> fattenMask(const Array2D<uint8_t> & mask, int radius) {
 }
 #endif
 
+namespace {
+
+struct RadianceSample {
+    double value;
+    double variance;
+};
+
+static double median(std::vector<double> values) {
+    if (values.empty()) return 0.0;
+    std::sort(values.begin(), values.end());
+    const size_t middle = values.size() / 2;
+    return values.size() & 1 ? values[middle] : 0.5 * (values[middle - 1] + values[middle]);
+}
+
+static double robustRadianceAverage(const std::vector<Image> & images, size_t first,
+                                    size_t x, size_t y, double fallback) {
+    std::vector<RadianceSample> samples;
+    samples.reserve(images.size() - first);
+    std::vector<double> values;
+    values.reserve(images.size() - first);
+
+    for (size_t k = first; k < images.size(); ++k) {
+        if (!images[k].contains(x, y) || images[k].isSaturatedAround(x, y)) continue;
+        const double raw = std::max(1.0, static_cast<double>(images[k](x, y)));
+        const double value = images[k].exposureAt(x, y);
+        // Generic Poisson-Gaussian sensor model. The constant represents a
+        // conservative four-DN read-noise floor; response scaling propagates
+        // that variance into the common radiometric domain.
+        double responseScale = std::abs(value) / raw;
+        if (responseScale < 1e-9) responseScale = std::abs(images[k].getRelativeExposure());
+        const double variance = std::max(1e-6, responseScale * responseScale * (raw + 16.0));
+        samples.push_back({value, variance});
+        values.push_back(value);
+    }
+    if (samples.size() < 2) return samples.empty() ? fallback : samples.front().value;
+
+    const double centre = median(values);
+    std::vector<double> deviations;
+    std::vector<double> variances;
+    deviations.reserve(samples.size());
+    variances.reserve(samples.size());
+    for (const auto & sample : samples) {
+        deviations.push_back(std::abs(sample.value - centre));
+        variances.push_back(sample.variance);
+    }
+    const double robustSigma = 1.4826 * median(deviations);
+    const double sensorSigma = std::sqrt(median(variances));
+    const double cutoff = 4.685 * std::max(robustSigma, sensorSigma);
+
+    double weighted = 0.0;
+    double weights = 0.0;
+    for (const auto & sample : samples) {
+        const double residual = std::abs(sample.value - centre);
+        const double u = cutoff > 0.0 ? residual / cutoff : 0.0;
+        if (u >= 1.0) continue;
+        const double robust = (1.0 - u*u) * (1.0 - u*u); // Tukey biweight
+        const double weight = robust / sample.variance;
+        weighted += sample.value * weight;
+        weights += weight;
+    }
+    return weights > 0.0 ? weighted / weights : fallback;
+}
+
+} // namespace
+
+
 Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadius, bool averageSamples,
                                    bool preserveExposure) const {
-    int imageMax = images.size() - 1;
-    BoxBlur map(fattenMask(mask, featherRadius));
-    measureTime("Blur", [&] () {
-        map.blur(featherRadius);
-    });
     Timer t("Compose");
     Array2D<float> dst(params.rawWidth, params.rawHeight);
     dst.displace(-(int)params.leftMargin, -(int)params.topMargin);
     dst.fillBorders(0.f);
 
-    float max = 0.0;
-    double saturatedRange = params.max - satThreshold;
+    Array2D<float> numerator(width, height), weightSum(width, height), selectedWeight(width, height);
+    std::fill_n(&numerator[0], width*height, 0.0f);
+    std::fill_n(&weightSum[0], width*height, 0.0f);
+    std::fill_n(&selectedWeight[0], width*height, 0.0f);
+
+    const size_t minDimension = std::min(width, height);
+    const int safeRadius = minDimension > 2
+        ? std::min<int>(std::max(0, featherRadius), static_cast<int>((minDimension - 1) / 2)) : 0;
+
+    // Blur a one-hot selection map for every exposure independently. Unlike
+    // blurring numeric layer indices, this cannot invent intermediate layers.
+    for (size_t layer = 0; layer < images.size(); ++layer) {
+        Array2D<uint8_t> selected(width, height);
+        #pragma omp parallel for schedule(dynamic)
+        for (size_t y = 0; y < height; ++y)
+            for (size_t x = 0; x < width; ++x)
+                selected(x, y) = mask(x, y) == layer ? 1 : 0;
+
+        BoxBlur layerWeight(selected);
+        if (safeRadius > 0) layerWeight.blur(safeRadius);
+
+        #pragma omp parallel for schedule(dynamic,16)
+        for (size_t y = 0; y < height; ++y) {
+            for (size_t x = 0; x < width; ++x) {
+                double weight = std::max(0.0f, layerWeight(x, y));
+                if (weight <= 1e-7 || !images[layer].contains(x, y)) continue;
+
+                const size_t chosen = mask(x, y);
+                const bool manuallySelected = chosen != origMask(x, y) && chosen == layer;
+                if ((layer < origMask(x, y) || images[layer].isSaturatedAround(x, y)) &&
+                    !manuallySelected) continue;
+
+                const bool automaticMotion = motionMask.size() == mask.size() && motionMask(x, y) &&
+                                             chosen == origMask(x, y);
+                if (automaticMotion && layer != chosen) continue;
+
+                const double value = images[layer].exposureAt(x, y);
+                if (layer != chosen && images[chosen].contains(x, y)) {
+                    // Radiometric guidance keeps feathering on the same side of
+                    // a real object edge while tolerating small response errors.
+                    const double guide = images[chosen].exposureAt(x, y);
+                    const double scale = std::max(1.0, std::max(std::abs(value), std::abs(guide)));
+                    const double sigma = std::max(32.0, 0.03 * scale + 3.0 * std::sqrt(scale));
+                    const double ratio = std::abs(value - guide) / sigma;
+                    weight /= 1.0 + ratio*ratio*ratio*ratio;
+                }
+                if (weight <= 1e-7) continue;
+                numerator(x, y) += static_cast<float>(weight * value);
+                weightSum(x, y) += static_cast<float>(weight);
+                if (layer == chosen) selectedWeight(x, y) = static_cast<float>(weight);
+            }
+        }
+    }
+
+    float max = 0.0f;
     #pragma omp parallel
     {
-        float maxthr = 0.0;
+        float maxthr = 0.0f;
         #pragma omp for schedule(dynamic,16) nowait
         for (size_t y = 0; y < height; ++y) {
             for (size_t x = 0; x < width; ++x) {
-                double v, vv;
-                double p = map(x,y);
-                p = p < 0.0 ? 0.0 : p;
-                int j = p;
-                if (images[j].contains(x, y)) {
-                    p = p - j;
-                    v = images[j].exposureAt(x, y);
-                    // Adjust false highlights
-                    if (j < origMask(x,y)) { // SaturatedAround
-                        v /= params.whiteMultAt(x, y);
-                        if(p > 0.0001) {
-                            uint16_t rawV = images[j].getMaxAround(x, y);
-                            double k = (rawV - satThreshold) / saturatedRange;
-                            if (k > 1.0)
-                                k = 1.0;
-                            p += (1.0 - p) * k;
-                        }
-                    }
+                const size_t chosen = mask(x, y);
+                double value;
+                if (weightSum(x, y) > 1e-7f) {
+                    value = numerator(x, y) / weightSum(x, y);
+                } else if (images[chosen].contains(x, y)) {
+                    value = images[chosen].exposureAt(x, y);
                 } else {
-                    v = 0.0;
-                    p = 1.0;
-                }
-                if (p > 0.0001 && j < imageMax && images[j + 1].contains(x, y)) {
-                    vv = images[j + 1].exposureAt(x, y);
-                    if (j + 1 < origMask(x,y)) { // SaturatedAround
-                        vv /= params.whiteMultAt(x, y);
+                    value = 0.0;
+                    for (const auto & image : images) {
+                        if (image.contains(x, y)) { value = image.exposureAt(x, y); break; }
                     }
-                } else {
-                    vv = 0.0;
-                    p = 0.0;
                 }
-                v -= p * (v - vv);
-                if (averageSamples && p < 0.0001) {
-                    double weighted = 0.0;
-                    double weights = 0.0;
-                    const size_t firstValid = std::max<size_t>(j, origMask(x, y));
-                    for (size_t k = firstValid; k < images.size(); ++k) {
-                        if (!images[k].contains(x, y) || images[k].isSaturatedAround(x, y)) continue;
-                        // Shot-noise variance falls as the captured signal grows, so
-                        // favour the brightest non-clipped sample at this CFA pixel.
-                        const double weight = std::max(1.0, static_cast<double>(images[k](x, y)));
-                        weighted += images[k].exposureAt(x, y) * weight;
-                        weights += weight;
-                    }
-                    if (weights > 0.0) v = weighted / weights;
+
+                const bool automaticMotion = motionMask.size() == mask.size() && motionMask(x, y) &&
+                                             chosen == origMask(x, y);
+                const double selectionConfidence = weightSum(x, y) > 0.0f
+                    ? selectedWeight(x, y) / weightSum(x, y) : 1.0;
+                if (averageSamples && !automaticMotion && selectionConfidence >= 0.98) {
+                    const size_t firstValid = std::max<size_t>(chosen, origMask(x, y));
+                    value = robustRadianceAverage(images, firstValid, x, y, value);
                 }
-                dst(x, y) = v;
-                if (v > maxthr) {
-                    maxthr = v;
-                }
+
+                dst(x, y) = static_cast<float>(value);
+                if (value > maxthr) maxthr = static_cast<float>(value);
             }
         }
         #pragma omp critical
-        if (maxthr > max) {
-            max = maxthr;
-        }
+        if (maxthr > max) max = maxthr;
     }
 
     dst.displace(params.leftMargin, params.topMargin);

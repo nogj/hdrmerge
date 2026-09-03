@@ -368,6 +368,26 @@ if(BUILD_TESTING AND OpenCV_FOUND)
     add_test(NAME cfa-alignment COMMAND test-cfa-alignment)
 endif()
 
+if(BUILD_TESTING)
+    set(merge_quality_sources
+        test/testMergeQuality.cpp
+        src/Image.cpp
+        src/CfaAlignment.cpp
+        src/ImageStack.cpp
+        src/Bitmap.cpp
+        src/RawParameters.cpp
+        src/BoxBlur.cpp
+    )
+    if(WIN32)
+        add_executable(test-merge-quality ${merge_quality_sources} $<TARGET_OBJECTS:alglib-objects>)
+    else()
+        add_executable(test-merge-quality ${merge_quality_sources})
+    endif()
+    target_include_directories(test-merge-quality PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(test-merge-quality ${hdrmerge_libs} Qt5::Core)
+    add_test(NAME merge-quality COMMAND test-merge-quality)
+endif()
+
 if(Boost_FOUND)
     add_subdirectory(test)
 endif()

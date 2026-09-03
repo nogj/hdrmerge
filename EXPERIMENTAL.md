@@ -347,9 +347,21 @@ la exposición común de referencia:
 diferencia (%) = 100 · |a - b| / max(1, |a|, |b|)
 ```
 
-Si la diferencia supera el umbral solicitado, la máscara selecciona la
-exposición de referencia para ese píxel. Valores bajos detectan más movimiento,
-pero pueden interpretar ruido como cambio de escena.
+La decisión ya no depende únicamente del umbral indicado. En sombras se añade
+un suelo adaptativo proporcional a la raíz cuadrada de la señal, aproximación
+del ruido de disparo. Así, una fluctuación pequeña sobre señal débil no se
+convierte automáticamente en movimiento.
+
+La detección inicial se consolida espacialmente por separado en los cuatro
+planos Bayer. Se consulta un vecindario `3 × 3` con paso de dos píxeles, de modo
+que todos los votos corresponden al mismo color CFA. Se exigen al menos tres
+votos y el núcleo aceptado se expande una muestra CFA para cubrir los bordes del
+objeto. Los puntos aislados —ruido, hot pixels o pequeñas imprecisiones— quedan
+descartados. En el núcleo coherente se utiliza exclusivamente la exposición de
+referencia; el feathering no vuelve a introducir allí otras exposiciones.
+
+Una edición manual posterior tiene prioridad: si el usuario modifica un píxel
+de la máscara automática, la composición respeta esa corrección.
 
 Se controla mediante:
 
@@ -358,13 +370,54 @@ Se controla mediante:
 ```
 
 En la GUI existe una casilla de activación y un selector porcentual. Permanece
-desactivado por defecto porque un algoritmo global sencillo no puede resolver
-correctamente todos los movimientos, oclusiones y reflejos.
+desactivado por defecto porque una máscara global no puede resolver correctamente
+todos los casos de movimiento, oclusión, transparencia o reflejos.
+
+### 7.1. Fusión mediante pesos por exposición
+
+La versión original suavizaba directamente el índice entero de la máscara. Un
+valor desenfocado de `1.4`, por ejemplo, significaba mezclar las capas 1 y 2.
+Esto solo es matemáticamente seguro cuando todas las fronteras conectan capas
+consecutivas. Una frontera directa entre las capas 0 y 3 podía atravesar las
+capas 1 y 2 aunque nunca hubieran sido seleccionadas.
+
+La rama experimental construye ahora una máscara *one-hot* independiente para
+cada exposición:
+
+```text
+M_k(x,y) = 1 si la máscara selecciona k; 0 en otro caso
+```
+
+Cada `M_k` se suaviza por separado y solo después se combinan y normalizan los
+pesos válidos:
+
+```text
+resultado(x,y) = Σ w_k(x,y) · E_k(x,y) / Σ w_k(x,y)
+```
+
+Una exposición queda excluida si no contiene el píxel, está saturada en su
+entorno o es anterior a la primera exposición segura. La selección manual puede
+anular esta última protección de forma explícita.
+
+El peso espacial se modula además por la semejanza radiométrica con la capa
+seleccionada. La penalización tiene forma suave de cuarto orden:
+
+```text
+w'_k = w_k / (1 + (|E_k - E_ref| / σ)^4)
+σ    = max(32, 0.03 · señal + 3 · √señal)
+```
+
+En una región estática, las exposiciones normalizadas son semejantes y el
+feathering funciona normalmente. En el contorno de un objeto desplazado, una
+muestra radiométricamente incompatible pierde peso en vez de producir una
+doble silueta. Todo ello opera sobre la muestra CFA de la misma coordenada, sin
+mezclar colores del mosaico.
 
 ## 8. Promediado para reducción de ruido
 
-La opción `--average` combina varias exposiciones válidas cuando el píxel no
-está en una transición suavizada de máscara.
+La opción `--average` combina varias exposiciones válidas cuando la selección
+local tiene al menos un 98 % de confianza y el píxel no pertenece al núcleo de
+movimiento automático.
 
 Solo participan imágenes que:
 
@@ -372,16 +425,36 @@ Solo participan imágenes que:
 - no están saturadas alrededor del píxel;
 - no han sido descartadas por la máscara original.
 
-El promedio se pondera por la señal RAW capturada:
+Las muestras se transforman primero al dominio radiométrico común. Para cada
+una se estima una varianza Poisson-gaussiana genérica:
 
 ```text
-resultado = Σ(exposición normalizada · peso) / Σ(peso)
-peso      = max(1, muestra RAW)
+varianza_RAW ≈ muestra_RAW + 4²
+varianza_E   ≈ escala_respuesta² · varianza_RAW
 ```
 
-La intención es favorecer la muestra más luminosa que todavía conserva margen,
-porque normalmente presenta mejor relación señal/ruido. Debe utilizarse solo en
-escenas estáticas: mezclar exposiciones con sujetos móviles puede crear fantasmas.
+El término `4²` representa un suelo conservador de ruido de lectura de cuatro
+unidades RAW. No pretende sustituir el perfil medido de cada cámara, pero evita
+el comportamiento incorrecto de ponderar únicamente por el valor RAW.
+
+Después se calcula la mediana de las exposiciones y una escala robusta mediante
+MAD. El peso final combina la inversa de la varianza con el biweight de Tukey:
+
+```text
+centro = mediana(E_k)
+σ_robusto = 1.4826 · mediana(|E_k - centro|)
+corte = 4.685 · max(σ_robusto, σ_sensor)
+peso_k = Tukey(residuo_k / corte) / varianza_k
+```
+
+Una muestra extrema recibe peso cero; las restantes se promedian con mayor peso
+para las que aportan menor varianza en el dominio radiométrico. Este estimador
+conserva la ganancia de relación señal/ruido de una media, pero evita que un hot
+pixel, un destello o un pequeño movimiento contamine por completo el resultado.
+
+Con dos imágenes no siempre es posible distinguir estadísticamente cuál se ha
+movido. Para escenas dinámicas sigue siendo recomendable activar simultáneamente
+el deghosting; la reducción robusta no sustituye la máscara de movimiento.
 
 En la GUI aparece en las propiedades del DNG como reducción de ruido
 experimental y puede guardarse como valor predeterminado.
@@ -668,7 +741,18 @@ con OpenCV 5.0 informó:
 100% tests passed
 ```
 
-### 17.2. Prueba real subpíxel
+### 17.2. Tests de fusión y ruido
+
+`test/testMergeQuality.cpp` añade tres regresiones sintéticas:
+
+- una frontera directa entre las capas 0 y 2 comprueba que la capa 1 no aparece
+  como consecuencia del feathering;
+- una pila con dos muestras coherentes y un valor temporal extremo comprueba el
+  rechazo robusto del outlier;
+- un punto discrepante aislado y una región discrepante compacta comprueban que
+  el primero se trata como ruido y la segunda como movimiento.
+
+### 17.3. Prueba real subpíxel
 
 Se fusionaron correctamente los tres DNG Nikon D5000 incluidos en `test/` con:
 
@@ -680,7 +764,7 @@ hdrmerge-nogui --alignment subpixel -o sample-subpixel.dng \
 El resultado fue un DNG de 16 bits y `4306×2858` píxeles, con código de salida
 cero.
 
-### 17.3. Prueba real afín
+### 17.4. Prueba real afín
 
 La misma serie se procesó con `--alignment affine`. Las transformaciones
 aceptadas mostraron aproximadamente:
@@ -692,13 +776,13 @@ imagen 0: posición (-1,646; +1,037), rotación -0,0812°, confianza 0,921
 
 Se generó un DNG de 16 bits y `4304×2856` píxeles.
 
-### 17.4. Round-trip DNG
+### 17.5. Round-trip DNG
 
 El DNG afín generado se volvió a abrir con HDRMerge y se guardó otra vez sin
 alineamiento. La operación terminó con código cero, validando al menos la
 coherencia estructural del archivo para LibRaw/HDRMerge.
 
-### 17.5. Errores y despliegue
+### 17.6. Errores y despliegue
 
 También se comprobó que:
 
@@ -764,6 +848,7 @@ hdrmerge-nogui.exe --batch --bracket-size 3 --preserve-exposure \
 | `src/DngFloatWriter.cpp/.hpp` | resultado verificable del escritor |
 | `src/ExifTransfer.cpp/.hpp` | propagación de fallos de metadatos |
 | `test/testCfaAlignment.cpp` | invariantes del remuestreo Bayer |
+| `test/testMergeQuality.cpp` | regresiones de máscara, movimiento y ruido robusto |
 | `.github/workflows/windows.yml` | CI y artefacto Windows experimental |
 | `scripts/build-windows.sh` | ensamblado portable y dependencias transitivas |
 
