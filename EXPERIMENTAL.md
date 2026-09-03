@@ -49,7 +49,8 @@ collisions, but this branch still needs validation across a broad camera set.
 ## Known limitations
 
 - CFA-safe subpixel and affine resampling currently supports repeating 2x2
-  Bayer patterns. X-Trans and uncommon CFA layouts fall back to integer mode.
+  Bayer patterns. X-Trans and uncommon CFA layouts keep the legacy behaviour
+  (alignment disabled when the CFA cannot be aligned safely).
 - Affine alignment is deliberately limited to small rotations and scale
   changes and still requires validation across a broader camera set.
 - Linear DNG input is not yet supported as a separate RGB processing path.
