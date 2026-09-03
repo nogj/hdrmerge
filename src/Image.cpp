@@ -25,6 +25,7 @@
 #include "Histogram.hpp"
 #include "Log.hpp"
 #include "RawParameters.hpp"
+#include "CfaAlignment.hpp"
 using namespace std;
 using namespace hdrmerge;
 
@@ -67,6 +68,12 @@ Image & Image::operator=(Image && move) {
     brightness = move.brightness;
     response = move.response;
     halfLightPercent = move.halfLightPercent;
+    validity = std::move(move.validity);
+    warped = move.warped;
+    alignmentX = move.alignmentX;
+    alignmentY = move.alignmentY;
+    alignmentConfidence = move.alignmentConfidence;
+    alignmentRotation = move.alignmentRotation;
     return *this;
 }
 
@@ -98,14 +105,10 @@ double Image::getRelativeExposure() const {
 
 
 void Image::computeResponseFunction(const Image & r) {
-    int reldx = dx - std::max(dx, r.dx);
-    int relrdx = r.dx - std::max(dx, r.dx);
-    int w = width + reldx + relrdx;
-    int reldy = dy - std::max(dy, r.dy);
-    int relrdy = r.dy - std::max(dy, r.dy);
-    int h = height + reldy + relrdy;
-    uint16_t * usePixels = &data[-reldy*width - reldx];
-    const uint16_t * rUsePixels = &r.data[-relrdy*width - relrdx];
+    const int left = std::max(dx, r.dx);
+    const int top = std::max(dy, r.dy);
+    const int right = std::min(dx + static_cast<int>(width), r.dx + static_cast<int>(r.width));
+    const int bottom = std::min(dy + static_cast<int>(height), r.dy + static_cast<int>(r.height));
 
     // Get average relative values between this image and the last one
     std::vector<std::pair<int, double>> histogram(max + 1);
@@ -116,11 +119,11 @@ void Image::computeResponseFunction(const Image & r) {
         std::vector<std::pair<int, double>> histogramThr(max + 1);
         for (auto & i : histogramThr) i = { 0, 0.0 };
         #pragma omp for nowait
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-                int pos = y * width + x;
-                uint16_t v = usePixels[pos];
-                uint16_t nv = rUsePixels[pos];
+        for (int y = top; y < bottom; ++y) {
+            for (int x = left; x < right; ++x) {
+                if (!contains(x, y) || !r.contains(x, y)) continue;
+                uint16_t v = (*this)(x, y);
+                uint16_t nv = r(x, y);
                 if (v >= nv && v < satThreshold) {
                     histogramThr[v].first++;
                     histogramThr[v].second += r.response(nv);
@@ -160,18 +163,18 @@ void Image::computeResponseFunction(const Image & r) {
         // Minimize square error between images:
         // min. C(n) = sum(n*f(x) - g(x))^2  ->  n = sum(f(x)*g(x)) / sum(f(x)^2)
         double numerator = 0, denom = 0;
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-                int pos = y * width + x;
-                double v = usePixels[pos];
-                double nv = rUsePixels[pos];
+        for (int y = top; y < bottom; ++y) {
+            for (int x = left; x < right; ++x) {
+                if (!contains(x, y) || !r.contains(x, y)) continue;
+                double v = (*this)(x, y);
+                double nv = r(x, y);
                 if (v >= nv && v < satThreshold) {
                     numerator += v * r.response(nv);
                     denom += v * v;
                 }
             }
         }
-        response.linear = numerator / denom;
+        if (denom > 0.0) response.linear = numerator / denom;
     }
 }
 
@@ -219,7 +222,79 @@ size_t Image::alignWith(const Image & r) {
         dy <<= 1;
         totalError += minError;
     }
+    alignmentX = dx;
+    alignmentY = dy;
+    alignmentConfidence = 1.0;
+    alignmentRotation = 0.0;
     return totalError;
+}
+
+
+bool Image::refineAlignment(const Image & reference, const RawParameters & params, AlignmentMode mode,
+                            std::string & reason) {
+    if (mode == AlignmentMode::Integer) return true;
+    if (!isSupportedCfaForWarp(params.FC)) {
+        reason = "subpixel CFA resampling currently supports 2x2 Bayer sensors only";
+        return false;
+    }
+    AlignmentTransform transform = estimateAlignmentTransform(*this, reference, dx, dy, mode);
+    if (!transform.valid) {
+        reason = transform.message;
+        return false;
+    }
+
+    Array2D<uint16_t> resampled;
+    Array2D<uint8_t> validMap;
+    resampleCfa(*this, resampled, validMap, params.FC, transform);
+    *static_cast<Array2D<uint16_t> *>(this) = std::move(resampled);
+    validity = std::move(validMap);
+    warped = true;
+    alignmentX = transform.placementX();
+    alignmentY = transform.placementY();
+    alignmentConfidence = transform.confidence;
+    alignmentRotation = std::atan2(transform.m[1][0], transform.m[0][0]) * 180.0 /
+        3.14159265358979323846;
+    reason = transform.message;
+    return true;
+}
+
+
+bool Image::contains(int x, int y) const {
+    if (!Array2D<uint16_t>::contains(x, y)) return false;
+    return !warped || validity(x, y) != 0;
+}
+
+
+void Image::displace(int newDx, int newDy) {
+    Array2D<uint16_t>::displace(newDx, newDy);
+    if (warped) validity.displace(newDx, newDy);
+}
+
+
+void Image::getValidBounds(int & left, int & top, int & right, int & bottom) const {
+    if (!warped) {
+        left = dx;
+        top = dy;
+        right = dx + static_cast<int>(width);
+        bottom = dy + static_cast<int>(height);
+        return;
+    }
+    int rawLeft = static_cast<int>(width), rawTop = static_cast<int>(height);
+    int rawRight = 0, rawBottom = 0;
+    for (int y = 0; y < static_cast<int>(height); ++y) {
+        for (int x = 0; x < static_cast<int>(width); ++x) {
+            if (validity[static_cast<size_t>(y) * width + x]) {
+                rawLeft = std::min(rawLeft, x);
+                rawTop = std::min(rawTop, y);
+                rawRight = std::max(rawRight, x + 1);
+                rawBottom = std::max(rawBottom, y + 1);
+            }
+        }
+    }
+    left = rawLeft + dx;
+    top = rawTop + dy;
+    right = rawRight + dx;
+    bottom = rawBottom + dy;
 }
 
 
@@ -247,18 +322,10 @@ void Image::preScale() {
 
 uint16_t Image::getMaxAround(size_t x, size_t y) const {
     uint16_t result = 0;
-    if ((int)y > dy) {
-        if ((int)x > dx) result = std::max(result, (*this)(x - 1, y - 1));
-        result = std::max(result, (*this)(x, y - 1));
-        if (x < width + dx - 1) result = std::max(result, (*this)(x + 1, y - 1));
-    }
-    if ((int)x > dx) result = std::max(result, (*this)(x - 1, y));
-    result = std::max(result, (*this)(x, y));
-    if (x < width + dx - 1) result = std::max(result, (*this)(x + 1, y));
-    if (y < height + dy - 1) {
-        if ((int)x > dx) result = std::max(result, (*this)(x - 1, y + 1));
-        result = std::max(result, (*this)(x, y + 1));
-        if (x < width + dx - 1) result = std::max(result, (*this)(x + 1, y + 1));
+    for (int yy = static_cast<int>(y) - 1; yy <= static_cast<int>(y) + 1; ++yy) {
+        for (int xx = static_cast<int>(x) - 1; xx <= static_cast<int>(x) + 1; ++xx) {
+            if (contains(xx, yy)) result = std::max(result, (*this)(xx, yy));
+        }
     }
     return result;
 }

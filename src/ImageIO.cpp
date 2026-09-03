@@ -200,7 +200,7 @@ int ImageIO::load(const LoadOptions & options, ProgressIndicator & progress) {
         params.max = std::min(params.max, options.customWl);
     stack.calculateSaturationLevel(params, options.useCustomWl);
     if (options.align && params.canAlign()) {
-        stack.align();
+        stack.align(params, options.alignmentMode);
         if (options.crop) {
             stack.crop();
         }

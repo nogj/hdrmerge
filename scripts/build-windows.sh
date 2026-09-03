@@ -69,6 +69,7 @@ Source branch: codex/experimental-functional-overhaul
 Source revision: ${GITHUB_SHA:-local build}
 Toolchain: MSYS2 UCRT64 x64
 ALGLIB: 3.15.0 GPL
+OpenCV: CFA-safe subpixel/affine registration
 EOF
 
 "${dist_dir}/hdrmerge-nogui.exe" --help >/dev/null

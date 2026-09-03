@@ -10,7 +10,8 @@ validated stable release.
 - Output collision protection and temporary-file based DNG replacement.
 - Zero black level in floating-point output to preserve shadow precision.
 - Conservative channel-safe clipping threshold.
-- Common-reference alignment to avoid accumulated chain drift.
+- Common-reference integer, subpixel and affine alignment without accumulated chain drift.
+- CFA-safe Bayer resampling with confidence checks and automatic integer fallback.
 - Optional automatic motion deghosting and multi-exposure noise averaging.
 - Optional exposure preservation across panorama bracket sets.
 - CR3 and additional RAW extensions plus an all-files selector.
@@ -33,16 +34,24 @@ CLI additions:
 --average
 --preserve-exposure
 --bracket-size N
+--alignment integer|subpixel|affine
 ```
+
+`subpixel` is the default alignment mode. `affine` additionally corrects small
+rotation and scale changes, but rejects transformations outside conservative
+limits. Both refined modes preserve the four Bayer phases independently and
+exclude invalid warped borders from merging. Use `-v` to inspect confidence
+and fallback messages.
 
 Always retain backups of source RAW files. The program prevents direct output
 collisions, but this branch still needs validation across a broad camera set.
 
 ## Known limitations
 
-- Registration is still integer-pixel, but now aligns every frame against one
-  common reference. True subpixel/affine registration would require a CFA-safe
-  resampling design and broader camera validation.
+- CFA-safe subpixel and affine resampling currently supports repeating 2x2
+  Bayer patterns. X-Trans and uncommon CFA layouts fall back to integer mode.
+- Affine alignment is deliberately limited to small rotations and scale
+  changes and still requires validation across a broader camera set.
 - Linear DNG input is not yet supported as a separate RGB processing path.
 - The DNG writer still renders the complete output in memory; very large or
   numerous files can therefore require substantial RAM.

@@ -24,12 +24,14 @@
 #define _IMAGE_H_
 
 #include <memory>
+#include <string>
 
 #include <QString>
 
 #include <interpolation.h>
 
 #include "Array2D.hpp"
+#include "LoadSaveOptions.hpp"
 
 
 namespace hdrmerge {
@@ -40,9 +42,11 @@ class Image : public Array2D<uint16_t> {
 public:
     static const int scaleSteps = 6;
 
-    Image() : Array2D<uint16_t>() {}
+    Image() : Array2D<uint16_t>(), warped(false), alignmentX(0.0), alignmentY(0.0),
+        alignmentConfidence(1.0), alignmentRotation(0.0) {}
     Image(uint16_t * rawImage, const RawParameters & params, const QString& _filename) :
-        filename(_filename)
+        filename(_filename), warped(false), alignmentX(0.0), alignmentY(0.0),
+        alignmentConfidence(1.0), alignmentRotation(0.0)
     {
         buildImage(rawImage, params);
     }
@@ -76,6 +80,8 @@ public:
     }
     double getRelativeExposure() const;
     size_t alignWith(const Image & r);
+    bool refineAlignment(const Image & reference, const RawParameters & params, AlignmentMode mode,
+                         std::string & reason);
     void preScale();
     void releaseAlignData() {
         scaled.reset();
@@ -89,6 +95,13 @@ public:
     {
         return max;
     }
+    bool contains(int x, int y) const;
+    void displace(int newDx, int newDy);
+    void getValidBounds(int & left, int & top, int & right, int & bottom) const;
+    double getAlignmentX() const { return alignmentX; }
+    double getAlignmentY() const { return alignmentY; }
+    double getAlignmentConfidence() const { return alignmentConfidence; }
+    double getAlignmentRotation() const { return alignmentRotation; }
 
 private:
     struct ResponseFunction {
@@ -108,6 +121,12 @@ private:
     double brightness;
     ResponseFunction response;
     double halfLightPercent;
+    Array2D<uint8_t> validity;
+    bool warped;
+    double alignmentX;
+    double alignmentY;
+    double alignmentConfidence;
+    double alignmentRotation;
 
     void subtractBlack(const RawParameters & params);
     void buildImage(uint16_t * rawImage, const RawParameters & params);

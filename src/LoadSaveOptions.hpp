@@ -28,6 +28,20 @@
 
 namespace hdrmerge {
 
+enum class AlignmentMode {
+    Integer,
+    Subpixel,
+    Affine
+};
+
+inline const char * alignmentModeName(AlignmentMode mode) {
+    switch (mode) {
+        case AlignmentMode::Integer: return "integer";
+        case AlignmentMode::Affine: return "affine";
+        default: return "subpixel";
+    }
+}
+
 struct LoadOptions {
     std::vector<QString> fileNames;
     bool align;
@@ -39,8 +53,9 @@ struct LoadOptions {
     bool withSingles;
     int deghostThreshold;
     int bracketSize;
+    AlignmentMode alignmentMode;
     LoadOptions() : align(true), crop(true), useCustomWl(false), customWl(16383), batch(false), batchGap(2.0),
-        withSingles(false), deghostThreshold(0), bracketSize(0) {}
+        withSingles(false), deghostThreshold(0), bracketSize(0), alignmentMode(AlignmentMode::Subpixel) {}
 };
 
 

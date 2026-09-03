@@ -276,10 +276,12 @@ void MainWindow::createToolbars() {
 void MainWindow::setPixelStatus(int x, int y) {
     int l = io.getImageStack().getImageAt(x, y);
     Image & img = io.getImageStack().getImage(l);
-    setStatus(tr("Layer %1: displaced %2,%3,%4 cropped | src. value = %5 ; result = %6")
+    setStatus(tr("Layer %1: alignment %2,%3 px · rotation %4° · confidence %5%6 cropped | src. value = %7 ; result = %8")
         .arg(l + 1)
-        .arg(img.getDeltaX())
-        .arg(img.getDeltaY())
+        .arg(img.getAlignmentX(), 0, 'f', 2)
+        .arg(img.getAlignmentY(), 0, 'f', 2)
+        .arg(img.getAlignmentRotation(), 0, 'f', 3)
+        .arg(img.getAlignmentConfidence(), 0, 'f', 3)
         .arg(io.getImageStack().isCropped() ? "" : " not")
         .arg(io.getImageStack().getImage(l)(x, y))
         .arg(io.getImageStack().value(x, y)));

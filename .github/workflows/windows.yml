@@ -42,6 +42,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-libraw
             mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-opencv
             mingw-w64-ucrt-x86_64-qt5-base
             mingw-w64-ucrt-x86_64-qt5-tools
             mingw-w64-ucrt-x86_64-zlib
@@ -49,6 +50,9 @@ jobs:
 
       - name: Build and assemble portable application
         run: ./scripts/build-windows.sh
+
+      - name: Run alignment tests
+        run: ctest --test-dir build-windows --output-on-failure
 
       - name: Upload portable ZIP
         uses: actions/upload-artifact@v4

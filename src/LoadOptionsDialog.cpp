@@ -73,6 +73,18 @@ LoadOptionsDialog::LoadOptionsDialog(QWidget * parent, Qt::WindowFlags f)
     alignBox->setChecked(settings.value("alignOnLoad", true).toBool());
     layout->addWidget(alignBox, 0);
 
+    alignmentModeBox = new QComboBox(this);
+    alignmentModeBox->addItem(tr("Integer pixels (compatible)"), "integer");
+    alignmentModeBox->addItem(tr("Subpixel (recommended)"), "subpixel");
+    alignmentModeBox->addItem(tr("Affine (experimental)"), "affine");
+    const QString savedAlignment = settings.value("alignmentModeOnLoad", "subpixel").toString();
+    int savedIndex = alignmentModeBox->findData(savedAlignment);
+    alignmentModeBox->setCurrentIndex(savedIndex < 0 ? 1 : savedIndex);
+    alignmentModeBox->setEnabled(alignBox->isChecked());
+    alignmentModeBox->setToolTip(tr("Subpixel preserves the Bayer phases. Affine also corrects small rotation and scale changes."));
+    connect(alignBox, SIGNAL(toggled(bool)), alignmentModeBox, SLOT(setEnabled(bool)));
+    layout->addWidget(alignmentModeBox, 0);
+
     cropBox = new QCheckBox(tr("Crop result image to optimal size."), this);
     cropBox->setChecked(settings.value("cropOnLoad", true).toBool());
     layout->addWidget(cropBox, 0);
@@ -181,6 +193,10 @@ void LoadOptionsDialog::accept() {
     QSettings settings;
     align = alignBox->isChecked();
     settings.setValue("alignOnLoad", align);
+    const QString alignmentName = alignmentModeBox->currentData().toString();
+    alignmentMode = alignmentName == "integer" ? AlignmentMode::Integer :
+        (alignmentName == "affine" ? AlignmentMode::Affine : AlignmentMode::Subpixel);
+    settings.setValue("alignmentModeOnLoad", alignmentName);
     crop = cropBox->isChecked();
     settings.setValue("cropOnLoad", crop);
     useCustomWl = customWhiteLevelBox->isChecked();

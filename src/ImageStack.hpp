@@ -45,6 +45,7 @@ public:
 
     int addImage(Image && i);
     void align();
+    void align(const RawParameters & params, AlignmentMode mode);
     void crop();
     void computeResponseFunctions();
     void generateMask(int deghostThreshold = 0);

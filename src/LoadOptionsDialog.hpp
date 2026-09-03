@@ -27,6 +27,7 @@
 #include <QListWidget>
 #include <QCheckBox>
 #include <QSpinBox>
+#include <QComboBox>
 #include "LoadSaveOptions.hpp"
 
 namespace hdrmerge {
@@ -50,6 +51,7 @@ private:
 
     QListWidget * fileList;
     QCheckBox * alignBox;
+    QComboBox * alignmentModeBox;
     QCheckBox * cropBox;
     QCheckBox * customWhiteLevelBox;
     QSpinBox * customWhiteLevelSpinBox;

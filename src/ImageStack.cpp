@@ -153,20 +153,82 @@ void ImageStack::align() {
     }
 }
 
-void ImageStack::crop() {
-    int dx = 0, dy = 0;
-    for (auto & i : images) {
-        int newDx = max(dx, i.getDeltaX());
-        int bound = min(dx + width, i.getDeltaX() + i.getWidth());
-        width = bound > newDx ? bound - newDx : 0;
-        dx = newDx;
-        int newDy = max(dy, i.getDeltaY());
-        bound = min(dy + height, i.getDeltaY() + i.getHeight());
-        height = bound > newDy ? bound - newDy : 0;
-        dy = newDy;
+
+void ImageStack::align(const RawParameters & params, AlignmentMode mode) {
+    align();
+    if (mode == AlignmentMode::Integer || images.size() < 2) return;
+
+    const size_t reference = images.size() - 1;
+    #pragma omp parallel for schedule(dynamic)
+    for (size_t i = 0; i < reference; ++i) {
+        std::string reason;
+        if (images[i].refineAlignment(images[reference], params, mode, reason)) {
+            Log::debug("Image ", i, " refined with ", alignmentModeName(mode),
+                       " alignment: placement (", images[i].getAlignmentX(), ", ",
+                       images[i].getAlignmentY(), "), rotation ", images[i].getAlignmentRotation(),
+                       " deg, confidence ", images[i].getAlignmentConfidence());
+        } else {
+            Log::progress("Warning: image ", i, ": ", alignmentModeName(mode),
+                          " alignment rejected; keeping integer alignment (", reason, ").");
+        }
     }
-    for (auto & i : images) {
-        i.displace(-dx, -dy);
+}
+
+void ImageStack::crop() {
+    if (images.empty()) return;
+    int left = std::numeric_limits<int>::min();
+    int top = std::numeric_limits<int>::min();
+    int right = std::numeric_limits<int>::max();
+    int bottom = std::numeric_limits<int>::max();
+    for (const auto & image : images) {
+        int il, it, ir, ib;
+        image.getValidBounds(il, it, ir, ib);
+        left = max(left, il);
+        top = max(top, it);
+        right = min(right, ir);
+        bottom = min(bottom, ib);
+    }
+    if (right <= left || bottom <= top) {
+        width = height = 0;
+        return;
+    }
+
+    // Largest all-valid rectangle. This removes triangular affine-warp borders,
+    // rather than treating their zero fill as real black sensor samples.
+    const int candidateWidth = right - left;
+    std::vector<int> heights(candidateWidth, 0);
+    int bestArea = 0, bestLeft = left, bestTop = top, bestRight = left, bestBottom = top;
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
+            bool valid = true;
+            for (const auto & image : images) {
+                if (!image.contains(x, y)) { valid = false; break; }
+            }
+            heights[x - left] = valid ? heights[x - left] + 1 : 0;
+        }
+        std::vector<int> bars;
+        for (int x = 0; x <= candidateWidth; ++x) {
+            const int current = x == candidateWidth ? 0 : heights[x];
+            while (!bars.empty() && heights[bars.back()] > current) {
+                const int index = bars.back();
+                bars.pop_back();
+                const int rectangleLeft = bars.empty() ? 0 : bars.back() + 1;
+                const int area = heights[index] * (x - rectangleLeft);
+                if (area > bestArea) {
+                    bestArea = area;
+                    bestLeft = left + rectangleLeft;
+                    bestRight = left + x;
+                    bestBottom = y + 1;
+                    bestTop = bestBottom - heights[index];
+                }
+            }
+            bars.push_back(x);
+        }
+    }
+    width = bestRight > bestLeft ? bestRight - bestLeft : 0;
+    height = bestBottom > bestTop ? bestBottom - bestTop : 0;
+    for (auto & image : images) {
+        image.displace(-bestLeft, -bestTop);
     }
 }
 

@@ -178,6 +178,18 @@ void Launcher::parseCommandLine() {
             Log::setMinimumPriority(0);
         } else if (string("--no-align") == argv[i]) {
             generalOptions.align = false;
+        } else if (string("--alignment") == argv[i]) {
+            if (++i < argc) {
+                const string mode(argv[i]);
+                if (mode == "integer") generalOptions.alignmentMode = AlignmentMode::Integer;
+                else if (mode == "subpixel") generalOptions.alignmentMode = AlignmentMode::Subpixel;
+                else if (mode == "affine") generalOptions.alignmentMode = AlignmentMode::Affine;
+                else {
+                    generalOptions.alignmentMode = AlignmentMode::Subpixel;
+                    cerr << tr("Invalid %1 parameter, using subpixel.").arg(argv[i - 1]) << endl;
+                }
+                generalOptions.align = true;
+            }
         } else if (string("--no-crop") == argv[i]) {
             generalOptions.crop = false;
         } else if (string("--batch") == argv[i] || string("-B") == argv[i]) {
@@ -297,6 +309,7 @@ void Launcher::showHelp() {
     cout << "    " << "--nogui       " << tr("Force command-line mode.") << endl;
     cout << "    " << "-b BPS        " << tr("Bits per sample, can be 16, 24 or 32.") << endl;
     cout << "    " << "--no-align    " << tr("Do not auto-align source images.") << endl;
+    cout << "    " << "--alignment MODE " << tr("Alignment mode: integer, subpixel (default), or affine.") << endl;
     cout << "    " << "--no-crop     " << tr("Do not crop the output image to the optimum size.") << endl;
     cout << "    " << "-m MASK_FILE  " << tr("Saves the mask to MASK_FILE as a PNG image.") << endl;
     cout << "    " << "              " << tr("Besides the parameters accepted by -o, it also accepts:") << endl;

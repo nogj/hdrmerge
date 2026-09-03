@@ -47,6 +47,14 @@ find_package(LibRaw REQUIRED)
 find_package(Exiv2 REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(OpenMP)
+find_package(OpenCV QUIET COMPONENTS core imgproc video)
+
+if(OpenCV_FOUND)
+    add_definitions(-DHDRMERGE_HAVE_OPENCV)
+    message(STATUS "OpenCV ${OpenCV_VERSION}: subpixel and affine alignment enabled")
+else()
+    message(WARNING "OpenCV not found: subpixel and affine modes will fall back to integer alignment")
+endif()
 
 # Commented-out as it doesn't link
 #find_package(Boost 1.46 COMPONENTS unit_test_framework)
@@ -62,6 +70,7 @@ include_directories(
     "${EXIV2_INCLUDE_DIR}"
     "${ZLIB_INCLUDE_DIRS}"
     "${ALGLIB_INCLUDES}"
+    "${OpenCV_INCLUDE_DIRS}"
 )
 
 if(NOT(CMAKE_BUILD_TYPE))
@@ -117,6 +126,7 @@ endif()
 # Sources and headers
 set(hdrmerge_sources
     src/Image.cpp
+    src/CfaAlignment.cpp
     src/ImageStack.cpp
     src/Bitmap.cpp
     src/RawParameters.cpp
@@ -193,6 +203,7 @@ set(hdrmerge_libs
     "${LibRaw_r_LIBRARIES}"
     "${EXIV2_LIBRARIES}"
     "${ZLIB_LIBRARIES}"
+    "${OpenCV_LIBS}"
 )
 
 if(WIN32)
@@ -344,6 +355,17 @@ else()
             execute_process(COMMAND \"${XDG-DESKTOP-MENU_EXECUTABLE}\" install --novendor \"${PROJECT_BINARY_DIR}/hdrmerge.desktop\")"
         )
     endif()
+endif()
+
+include(CTest)
+if(BUILD_TESTING AND OpenCV_FOUND)
+    add_executable(test-cfa-alignment
+        test/testCfaAlignment.cpp
+        src/CfaAlignment.cpp
+    )
+    target_include_directories(test-cfa-alignment PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(test-cfa-alignment ${OpenCV_LIBS})
+    add_test(NAME cfa-alignment COMMAND test-cfa-alignment)
 endif()
 
 if(Boost_FOUND)
