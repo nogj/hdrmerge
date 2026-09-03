@@ -378,7 +378,7 @@ if(BUILD_TESTING)
         src/RawParameters.cpp
         src/BoxBlur.cpp
     )
-    if(WIN32)
+    if(WIN32 OR APPLE)
         add_executable(test-merge-quality ${merge_quality_sources} $<TARGET_OBJECTS:alglib-objects>)
     else()
         add_executable(test-merge-quality ${merge_quality_sources})

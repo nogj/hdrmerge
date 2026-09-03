@@ -23,6 +23,7 @@
 #ifndef _IMAGE_H_
 #define _IMAGE_H_
 
+#include <array>
 #include <memory>
 #include <string>
 
@@ -31,6 +32,7 @@
 #include <interpolation.h>
 
 #include "Array2D.hpp"
+#include "CFAPattern.hpp"
 #include "LoadSaveOptions.hpp"
 
 
@@ -66,7 +68,9 @@ public:
         return width > 0;
     }
     double exposureAt(size_t x, size_t y) const {
-        return response((*this)(x, y));
+        const int localX = static_cast<int>(x) - dx;
+        const int localY = static_cast<int>(y) - dy;
+        return response((*this)(x, y)) * channelScale[cfaPattern(localX, localY)];
     }
     uint16_t getMaxAround(size_t x, size_t y) const;
     bool isSaturated(uint16_t v) const {
@@ -120,6 +124,8 @@ private:
     uint16_t satThreshold, max;
     double brightness;
     ResponseFunction response;
+    CFAPattern cfaPattern;
+    std::array<double, 4> channelScale{{1.0, 1.0, 1.0, 1.0}};
     double halfLightPercent;
     Array2D<uint8_t> validity;
     bool warped;

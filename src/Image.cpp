@@ -26,8 +26,35 @@
 #include "Log.hpp"
 #include "RawParameters.hpp"
 #include "CfaAlignment.hpp"
+#include <array>
+#include <cmath>
 using namespace std;
 using namespace hdrmerge;
+
+namespace {
+
+constexpr int ratioHistogramBins = 1024;
+constexpr double minChannelRatio = 0.5;
+constexpr double maxChannelRatio = 2.0;
+
+struct RatioHistogram {
+    std::array<std::array<size_t, ratioHistogramBins>, 4> bins{};
+    std::array<size_t, 4> samples{};
+};
+
+int ratioBin(double ratio) {
+    const double position = (ratio - minChannelRatio) /
+                            (maxChannelRatio - minChannelRatio);
+    return std::max(0, std::min(ratioHistogramBins - 1,
+        static_cast<int>(position * ratioHistogramBins)));
+}
+
+double binRatio(int bin) {
+    const double position = (bin + 0.5) / ratioHistogramBins;
+    return minChannelRatio + (maxChannelRatio - minChannelRatio) * position;
+}
+
+} // namespace
 
 
 void Image::ResponseFunction::setLinear(double slope) {
@@ -54,6 +81,8 @@ void Image::buildImage(uint16_t * rawImage, const RawParameters & params) {
         }
     }
     brightness /= size;
+    cfaPattern = params.FC;
+    channelScale.fill(1.0);
     response.setLinear(params.max == 0 ? 1.0 : 65535.0 / params.max);
     subtractBlack(params);
 }
@@ -67,6 +96,8 @@ Image & Image::operator=(Image && move) {
     max = move.max;
     brightness = move.brightness;
     response = move.response;
+    cfaPattern = move.cfaPattern;
+    channelScale = move.channelScale;
     halfLightPercent = move.halfLightPercent;
     validity = std::move(move.validity);
     warped = move.warped;
@@ -110,6 +141,8 @@ void Image::computeResponseFunction(const Image & r) {
     const int right = std::min(dx + static_cast<int>(width), r.dx + static_cast<int>(r.width));
     const int bottom = std::min(dy + static_cast<int>(height), r.dy + static_cast<int>(r.height));
 
+    channelScale.fill(1.0);
+
     // Get average relative values between this image and the last one
     std::vector<std::pair<int, double>> histogram(max + 1);
     for (auto & i : histogram) i = { 0, 0.0 };
@@ -126,7 +159,7 @@ void Image::computeResponseFunction(const Image & r) {
                 uint16_t nv = r(x, y);
                 if (v >= nv && v < satThreshold) {
                     histogramThr[v].first++;
-                    histogramThr[v].second += r.response(nv);
+                    histogramThr[v].second += r.exposureAt(x, y);
                 }
             }
         }
@@ -169,13 +202,69 @@ void Image::computeResponseFunction(const Image & r) {
                 double v = (*this)(x, y);
                 double nv = r(x, y);
                 if (v >= nv && v < satThreshold) {
-                    numerator += v * r.response(nv);
+                    numerator += v * r.exposureAt(x, y);
                     denom += v * v;
                 }
             }
         }
         if (denom > 0.0) response.linear = numerator / denom;
     }
+
+    // A shared response curve can leave small colour-dependent residuals.
+    // At an exposure seam the demosaicer interprets those residuals as false
+    // colour, so estimate a robust multiplicative correction per CFA channel.
+    RatioHistogram ratios;
+    const uint16_t noiseFloor = 64;
+    #pragma omp parallel
+    {
+        RatioHistogram local;
+        #pragma omp for nowait
+        for (int y = top; y < bottom; ++y) {
+            for (int x = left; x < right; ++x) {
+                if (!contains(x, y) || !r.contains(x, y)) continue;
+                const uint16_t raw = (*this)(x, y);
+                const uint16_t referenceRaw = r(x, y);
+                if (raw <= noiseFloor || referenceRaw <= noiseFloor ||
+                    raw >= satThreshold || referenceRaw >= r.satThreshold) continue;
+
+                const int color = cfaPattern(x - dx, y - dy);
+                const int referenceColor = r.cfaPattern(x - r.dx, y - r.dy);
+                if (color != referenceColor) continue;
+
+                const double mapped = response(raw);
+                const double reference = r.exposureAt(x, y);
+                if (mapped <= 0.0 || reference <= 0.0) continue;
+                const double ratio = reference / mapped;
+                if (ratio < minChannelRatio || ratio > maxChannelRatio) continue;
+
+                ++local.bins[color][ratioBin(ratio)];
+                ++local.samples[color];
+            }
+        }
+        #pragma omp critical
+        {
+            for (int color = 0; color < 4; ++color) {
+                ratios.samples[color] += local.samples[color];
+                for (int bin = 0; bin < ratioHistogramBins; ++bin)
+                    ratios.bins[color][bin] += local.bins[color][bin];
+            }
+        }
+    }
+
+    for (int color = 0; color < 4; ++color) {
+        if (ratios.samples[color] < 64) continue;
+        const size_t middle = (ratios.samples[color] + 1) / 2;
+        size_t cumulative = 0;
+        for (int bin = 0; bin < ratioHistogramBins; ++bin) {
+            cumulative += ratios.bins[color][bin];
+            if (cumulative >= middle) {
+                channelScale[color] = binRatio(bin);
+                break;
+            }
+        }
+    }
+    Log::debug("CFA response scales: ", channelScale[0], ", ", channelScale[1], ", ",
+               channelScale[2], ", ", channelScale[3]);
 }
 
 

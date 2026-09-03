@@ -43,6 +43,35 @@ int main() {
     const size_t width = 32, height = 24;
     RawParameters params = makeParameters(width, height);
 
+    // A global response alone leaves colour-dependent residuals at CFA seams.
+    {
+        const size_t responseWidth = 64, responseHeight = 48;
+        RawParameters responseParams = makeParameters(responseWidth, responseHeight);
+        const double multipliers[4] = {2.30, 2.00, 1.75, 2.10};
+        std::vector<uint16_t> candidate(responseWidth*responseHeight);
+        std::vector<uint16_t> reference(responseWidth*responseHeight);
+        for (size_t y = 0; y < responseHeight; ++y) {
+            for (size_t x = 0; x < responseWidth; ++x) {
+                const size_t pos = y*responseWidth + x;
+                reference[pos] = static_cast<uint16_t>(800 + (x*71 + y*43) % 5000);
+                const int color = responseParams.FC(x, y);
+                candidate[pos] = static_cast<uint16_t>(reference[pos] * multipliers[color]);
+            }
+        }
+
+        Image brighter = makeImage(candidate, responseParams);
+        Image darker = makeImage(reference, responseParams);
+        brighter.computeResponseFunction(darker);
+        for (size_t y = 0; y < responseHeight; ++y) {
+            for (size_t x = 0; x < responseWidth; ++x) {
+                const double expected = darker.exposureAt(x, y);
+                const double actual = brighter.exposureAt(x, y);
+                ok &= check(std::abs(actual - expected) / expected < 0.01,
+                            "per-channel response left a CFA exposure discontinuity");
+            }
+        }
+    }
+
     // A seam directly between layers 0 and 2 must never sample layer 1.
     // Its deliberately extreme boundary value catches the old scalar-index blur.
     {
