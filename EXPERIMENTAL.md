@@ -733,11 +733,12 @@ Qt, DLL transitivas, licencia, README y `BUILD-INFO.txt`.
 El test asigna rangos numéricos disjuntos a `R`, `G1`, `G2` y `B`; cualquier
 mezcla entre fases provoca un fallo inmediato.
 
-CTest se ejecuta en GitHub Actions después de compilar. La ejecución validada
-con OpenCV 5.0 informó:
+CTest se ejecuta en GitHub Actions después de compilar. La ejecución que valida
+la nueva composición y el alineamiento informó:
 
 ```text
-1/1 Test #1: cfa-alignment ... Passed
+Test #1: cfa-alignment ... Passed
+Test #2: merge-quality ... Passed
 100% tests passed
 ```
 
@@ -792,10 +793,10 @@ También se comprobó que:
 - el ejecutable GUI localiza `qt.conf` y `qwindows.dll`;
 - el artefacto contiene las DLL de OpenCV necesarias.
 
-La ejecución de CI validada es:
+La ejecución de CI más reciente validada es:
 
 ```text
-https://github.com/nogj/hdrmerge/actions/runs/33749982251
+https://github.com/nogj/hdrmerge/actions/runs/33791488270
 ```
 
 ## 18. Ejemplos de uso
