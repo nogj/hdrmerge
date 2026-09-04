@@ -71,11 +71,12 @@ Los errores se propagan hasta GUI y CLI, las operaciones cancelables liberan el
 estado parcial y la escritura usa archivos temporales. Los modos detallados
 informan de desplazamiento, rotación, confianza y fallback.
 
-### 2.7. Funciones arriesgadas desactivadas por defecto
+### 2.7. Valores predeterminados conservadores
 
-El deghosting automático, el promediado de exposiciones y el modo afín pueden
-ser útiles, pero dependen mucho de la escena. Se mantienen como opciones
-explícitas o experimentales.
+El deghosting automático y el modo afín dependen mucho de la escena y se
+mantienen como opciones explícitas. La fusión de exposiciones coherentes para
+reducir ruido sí está activada por defecto: exige consenso radiométrico y vuelve
+a la exposición seleccionada por la máscara cuando no puede establecerlo.
 
 ## 3. Versión e identificación
 
@@ -307,15 +308,22 @@ confianza de la capa situada bajo el cursor.
 
 ## 6. Selección de saturación y precisión radiométrica
 
-### 6.1. Umbral seguro por canal
+### 6.1. Umbral blanco en el dominio correcto
 
-El original calculaba niveles altos por color pero podía escoger un máximo que
-dejara participar a un canal ya saturado. La rama experimental utiliza el menor
-nivel válido entre los canales CFA presentes, combinado con el máximo declarado
-por la cámara.
+La detección se realiza después de sustraer el nivel negro. Por tanto, el nivel
+blanco declarado por LibRaw se convierte al mismo dominio:
 
-El criterio es conservador: es preferible pasar antes a una exposición más
-oscura que incorporar una muestra recortada como si fuera lineal.
+```text
+blanco_útil = blanco_cámara - negro_máximo
+```
+
+Ese valor es la referencia principal. Un máximo observado solo puede refinarlo
+si alcanza al menos el 90 % del blanco útil y es, por tanto, compatible con una
+meseta de recorte real. Una zona plana o un canal CFA que no llegue a saturarse
+ya no puede hundir el umbral común hasta un valor ordinario de la escena.
+
+Salvo que el usuario proporcione un nivel blanco personalizado, se conserva un
+margen de seguridad del 1 %.
 
 ### 6.2. Nivel negro del DNG flotante
 
@@ -327,14 +335,31 @@ El DNG resultante declara niveles negros iguales a cero. No se vuelve a sumar el
 nivel negro del RAW original, lo que evita desplazar las sombras y conserva
 mejor la precisión del DNG flotante.
 
-### 6.3. Funciones de respuesta y regiones válidas
+### 6.3. Escala radiométrica global robusta
 
-El cálculo de respuesta entre exposiciones dejó de asumir que toda la
-intersección rectangular contiene datos. Recorre coordenadas globales y omite
-muestras inválidas en cualquiera de las dos imágenes.
+Para cada pareja de exposiciones se estiman razones sobre su solapamiento
+válido. Solo se comparan muestras de la misma fase CFA, por encima del suelo de
+ruido y por debajo del 90 % de sus umbrales de saturación. El área se divide en
+una cuadrícula `16 x 16`; cada celda aporta la mediana de las razones en dominio
+logarítmico, evitando que una región extensa, texturada o en movimiento domine
+la estimación.
 
-El fallback lineal comprueba también que el denominador sea distinto de cero,
-evitando producir factores `NaN` o infinitos en escenas degeneradas.
+Las medianas se consolidan mediante MAD y un refinamiento Huber. Después, todas
+las relaciones válidas entre parejas se resuelven conjuntamente para obtener
+una única escala por imagen. Cuatro iteraciones IRLS reducen el peso de una
+pareja incompatible con el resto de la pila. Así no se acumula error al encadenar
+exposiciones consecutivas y no se introducen ganancias independientes por canal
+CFA.
+
+Si el grafo de relaciones no conecta toda la pila, se emplean como fallback las
+estimaciones robustas entre imágenes adyacentes.
+
+### 6.4. Transición antes de saturación
+
+Una muestra conserva peso completo hasta el 85 % del umbral. Entre el 85 % y el
+100 % su confianza decrece suavemente mediante una curva *smoothstep* y, al
+alcanzar el umbral, queda excluida de la fusión adaptativa. Esto evita que sus
+pesos cambien bruscamente en el borde de una alta luz.
 
 ## 7. Deghosting automático
 
@@ -413,51 +438,47 @@ muestra radiométricamente incompatible pierde peso en vez de producir una
 doble silueta. Todo ello opera sobre la muestra CFA de la misma coordenada, sin
 mezclar colores del mosaico.
 
-## 8. Promediado para reducción de ruido
+## 8. Fusión adaptativa para reducción de ruido
 
-La opción `--average` combina varias exposiciones válidas cuando la selección
-local tiene al menos un 98 % de confianza y el píxel no pertenece al núcleo de
-movimiento automático.
+La fusión está activada por defecto. `--average` permite solicitarla
+explícitamente y `--no-average` restaura la composición basada únicamente en la
+selección y el feathering de la máscara.
 
-Solo participan imágenes que:
-
-- contienen una muestra geométricamente válida;
-- no están saturadas alrededor del píxel;
-- no han sido descartadas por la máscara original.
-
-Las muestras se transforman primero al dominio radiométrico común. Para cada
-una se estima una varianza Poisson-gaussiana genérica:
+En regiones estáticas se consideran, desde la primera exposición segura
+seleccionada por la máscara, todas las imágenes que contienen el píxel. Cada
+muestra se transforma al dominio radiométrico común y recibe una confianza de
+saturación según la transición descrita en 6.4. Su varianza se aproxima con un
+modelo Poisson-gaussiano genérico:
 
 ```text
 varianza_RAW ≈ muestra_RAW + 4²
 varianza_E   ≈ escala_respuesta² · varianza_RAW
 ```
 
-El término `4²` representa un suelo conservador de ruido de lectura de cuatro
-unidades RAW. No pretende sustituir el perfil medido de cada cámara, pero evita
-el comportamiento incorrecto de ponderar únicamente por el valor RAW.
+El término `4²` es un suelo conservador de ruido de lectura de cuatro unidades
+RAW. No sustituye un perfil medido de la cámara, pero permite ponderar más las
+observaciones con menor ruido estimado.
 
-Después se calcula la mediana de las exposiciones y una escala robusta mediante
-MAD. El peso final combina la inversa de la varianza con el biweight de Tukey:
+El centro robusto se obtiene mediante la mediana. Para cada muestra se compara
+su residuo con la observación más próxima a ese centro:
 
 ```text
-centro = mediana(E_k)
-σ_robusto = 1.4826 · mediana(|E_k - centro|)
-corte = 4.685 · max(σ_robusto, σ_sensor)
-peso_k = Tukey(residuo_k / corte) / varianza_k
+corte_k = 5 · √(varianza_k + varianza_ancla) + 0.01 · señal
+peso_k  = confianza_saturación · Tukey(residuo_k / corte_k) / varianza_k
 ```
 
-Una muestra extrema recibe peso cero; las restantes se promedian con mayor peso
-para las que aportan menor varianza en el dominio radiométrico. Este estimador
-conserva la ganancia de relación señal/ruido de una media, pero evita que un hot
-pixel, un destello o un pequeño movimiento contamine por completo el resultado.
+Solo se produce la media si al menos dos exposiciones superan el control de
+coherencia. Si no hay consenso, se conserva el resultado seleccionado por la
+máscara; esto es especialmente importante con dos observaciones discrepantes,
+donde no hay información suficiente para decidir cuál representa la escena.
 
-Con dos imágenes no siempre es posible distinguir estadísticamente cuál se ha
-movido. Para escenas dinámicas sigue siendo recomendable activar simultáneamente
-el deghosting; la reducción robusta no sustituye la máscara de movimiento.
+Las zonas detectadas como movimiento y los píxeles editados manualmente siempre
+mantienen una sola fuente. Por tanto, la máscara no implica que las demás
+exposiciones dejen de aportar información: fija la exposición segura de partida
+y el fallback, mientras las exposiciones coherentes adicionales reducen ruido.
 
-En la GUI aparece en las propiedades del DNG como reducción de ruido
-experimental y puede guardarse como valor predeterminado.
+En la GUI aparece en las propiedades del DNG como **Combine consistent
+exposures to reduce noise** y puede guardarse como valor predeterminado.
 
 ## 9. Preservación de exposición entre series
 
@@ -603,7 +624,8 @@ suavizado, promedio y preservación de exposición pueden persistirse mediante
 --nogui                  fuerza el procesamiento por consola
 --alignment MODE         integer, subpixel o affine
 --deghost N              umbral porcentual de movimiento
---average                promedia exposiciones válidas
+--average                fusiona exposiciones coherentes (predeterminado)
+--no-average             usa solo la selección de la máscara
 --preserve-exposure      conserva escala entre brackets
 --bracket-size N         limita cada grupo a N imágenes
 ```
@@ -658,7 +680,7 @@ IMG_1201.dng + IMG_1202.dng + IMG_1203.dng → %cf = IMG
 | Recorte óptimo | Sí | `--no-crop` |
 | Nivel blanco personalizado | Sí | `-w` |
 | Deghosting | Sí | `--deghost N` |
-| Promedio para ruido | Sí | `--average` |
+| Fusión para reducir ruido | Sí | `--average` / `--no-average` |
 | Preservar exposición | Sí | `--preserve-exposure` |
 | 16/24/32 bits | Sí | `-b` |
 | Tamaño de preview DNG | Sí | `-p` |
@@ -744,12 +766,20 @@ Test #2: merge-quality ... Passed
 
 ### 17.2. Tests de fusión y ruido
 
-`test/testMergeQuality.cpp` añade tres regresiones sintéticas:
+`test/testMergeQuality.cpp` cubre las siguientes regresiones sintéticas:
 
+- la fusión adaptativa está activada por defecto;
+- la confianza de saturación se desvanece de forma continua antes del recorte;
+- un canal CFA no saturado no hunde el umbral blanco común;
+- un degradado RAW con una región atípica recupera la razón de exposición sin
+  dejar una discontinuidad en el cambio de fuente;
+- tres exposiciones con razones `8:2:1` recuperan una escala global coherente;
 - una frontera directa entre las capas 0 y 2 comprueba que la capa 1 no aparece
   como consecuencia del feathering;
 - una pila con dos muestras coherentes y un valor temporal extremo comprueba el
   rechazo robusto del outlier;
+- dos muestras incompatibles comprueban el fallback a la exposición seleccionada
+  por la máscara;
 - un punto discrepante aislado y una región discrepante compacta comprueban que
   el primero se trata como ruido y la segunda como movimiento.
 
@@ -783,7 +813,20 @@ El DNG afín generado se volvió a abrir con HDRMerge y se guardó otra vez sin
 alineamiento. La operación terminó con código cero, validando al menos la
 coherencia estructural del archivo para LibRaw/HDRMerge.
 
-### 17.6. Errores y despliegue
+### 17.6. Bracket real Canon
+
+La composición se comprobó también con `IMG_2586.CR2`, `IMG_2587.CR2` e
+`IMG_2588.CR2`. La corrección mantuvo el blanco útil en el rango declarado por
+la cámara, eliminó el arco cromático que coincidía con el cambio de exposición
+y produjo una reducción de ruido aproximada del 10 al 20 % en recortes planos,
+según la zona medida.
+
+El mosaico RAW generado con `--no-average` se comparó con el resultado del modo
+de selección anterior y no presentó diferencias de píxel. Esta opción permite
+separar en una prueba A/B la contribución de la nueva fusión de los cambios en
+alineamiento, respuesta o máscara.
+
+### 17.7. Errores y despliegue
 
 También se comprobó que:
 
@@ -793,10 +836,10 @@ También se comprobó que:
 - el ejecutable GUI localiza `qt.conf` y `qwindows.dll`;
 - el artefacto contiene las DLL de OpenCV necesarias.
 
-La ejecución de CI más reciente validada es:
+La ejecución de CI que valida la revisión funcional `353456a` es:
 
 ```text
-https://github.com/nogj/hdrmerge/actions/runs/33791488270
+https://github.com/nogj/hdrmerge/actions/runs/33840818929
 ```
 
 ## 18. Ejemplos de uso
@@ -823,7 +866,14 @@ hdrmerge-nogui.exe --alignment integer -o resultado.dng *.dng
 ### Serie estática con reducción de ruido
 
 ```bash
-hdrmerge-nogui.exe --average --deghost 12 -o resultado.dng *.dng
+hdrmerge-nogui.exe --deghost 12 -o resultado.dng *.dng
+```
+
+La reducción de ruido ya está activa en este ejemplo. Para obtener la
+composición basada únicamente en la máscara:
+
+```bash
+hdrmerge-nogui.exe --no-average -o resultado.dng *.dng
 ```
 
 ### Lotes de tres exposiciones para panorama
@@ -838,8 +888,8 @@ hdrmerge-nogui.exe --batch --bracket-size 3 --preserve-exposure \
 | Archivo | Responsabilidad |
 |---|---|
 | `src/CfaAlignment.cpp/.hpp` | ECC, validación geométrica y remuestreo CFA-safe |
-| `src/Image.cpp/.hpp` | transformación, validez y métricas por exposición |
-| `src/ImageStack.cpp/.hpp` | referencia común, máscara, recorte y composición |
+| `src/Image.cpp/.hpp` | transformación, validez, escala radiométrica y saturación |
+| `src/ImageStack.cpp/.hpp` | respuesta global, máscara, recorte y fusión adaptativa |
 | `src/ImageIO.cpp/.hpp` | carga robusta, salida transaccional y máscaras PNG |
 | `src/Launcher.cpp/.hpp` | CLI, batch, códigos de salida y selección GUI/CLI |
 | `src/LoadOptionsDialog.cpp/.hpp` | modo de alineamiento y deghosting |
