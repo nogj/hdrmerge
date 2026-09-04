@@ -68,7 +68,7 @@ struct SaveOptions {
     int featherRadius;
     bool averageSamples;
     bool preserveExposure;
-    SaveOptions() : bps(16), previewSize(0), saveMask(false), featherRadius(3), averageSamples(false), preserveExposure(false) {}
+    SaveOptions() : bps(16), previewSize(0), saveMask(false), featherRadius(3), averageSamples(true), preserveExposure(false) {}
 };
 
 } // namespace hdrmerge

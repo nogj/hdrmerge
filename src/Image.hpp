@@ -23,7 +23,6 @@
 #ifndef _IMAGE_H_
 #define _IMAGE_H_
 
-#include <array>
 #include <memory>
 #include <string>
 
@@ -42,6 +41,15 @@ class RawParameters;
 
 class Image : public Array2D<uint16_t> {
 public:
+    struct ExposureRatioEstimate {
+        double logRatio = 0.0;
+        double weight = 0.0;
+        size_t samples = 0;
+        size_t tiles = 0;
+
+        bool valid() const { return weight > 0.0 && tiles > 0; }
+    };
+
     static const int scaleSteps = 6;
 
     Image() : Array2D<uint16_t>(), warped(false), alignmentX(0.0), alignmentY(0.0),
@@ -68,9 +76,7 @@ public:
         return width > 0;
     }
     double exposureAt(size_t x, size_t y) const {
-        const int localX = static_cast<int>(x) - dx;
-        const int localY = static_cast<int>(y) - dy;
-        return response((*this)(x, y)) * channelScale[cfaPattern(localX, localY)];
+        return response((*this)(x, y));
     }
     uint16_t getMaxAround(size_t x, size_t y) const;
     bool isSaturated(uint16_t v) const {
@@ -82,7 +88,10 @@ public:
     bool isSaturatedAround(size_t x, size_t y) const {
         return isSaturated(getMaxAround(x, y));
     }
+    double saturationWeightAround(size_t x, size_t y) const;
     double getRelativeExposure() const;
+    ExposureRatioEstimate estimateExposureRatio(const Image & reference) const;
+    void setRelativeExposure(double scale);
     size_t alignWith(const Image & r);
     bool refineAlignment(const Image & reference, const RawParameters & params, AlignmentMode mode,
                          std::string & reason);
@@ -125,7 +134,6 @@ private:
     double brightness;
     ResponseFunction response;
     CFAPattern cfaPattern;
-    std::array<double, 4> channelScale{{1.0, 1.0, 1.0, 1.0}};
     double halfLightPercent;
     Array2D<uint8_t> validity;
     bool warped;

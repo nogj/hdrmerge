@@ -105,9 +105,9 @@ DngPropertiesDialog::DngPropertiesDialog(QWidget * parent, Qt::WindowFlags f)
     formLayout->addRow(tr("Preview size:"), previewSelector);
     formLayout->addRow(tr("Mask blur radius:"), radiusSelector);
 
-    averageSamplesBox = new QCheckBox(tr("Average valid exposures to reduce noise (experimental)"), this);
+    averageSamplesBox = new QCheckBox(tr("Combine consistent exposures to reduce noise"), this);
     averageSamplesBox->setChecked(averageSamples);
-    averageSamplesBox->setToolTip(tr("May create ghosts when subjects moved. Leave disabled for normal brackets."));
+    averageSamplesBox->setToolTip(tr("Inconsistent, moving and manually selected areas keep a single exposure."));
     formLayout->addRow(tr("Noise reduction:"), averageSamplesBox);
 
     preserveExposureBox = new QCheckBox(tr("Preserve absolute exposure across bracketed sets"), this);
@@ -162,7 +162,7 @@ void DngPropertiesDialog::loadDefaultOptions() {
     bps = settings.value("bps", 16).toInt();
     previewSize = settings.value("previewSize", 2).toInt();
     saveMask = settings.value("saveMask", false).toBool();
-    averageSamples = settings.value("averageSamples", false).toBool();
+    averageSamples = settings.value("averageSamples", true).toBool();
     preserveExposure = settings.value("preserveExposure", false).toBool();
     maskFileName = settings.value("maskFileName", "%od/%of_mask.png").toString().toLocal8Bit().constData();
     featherRadius = settings.value("featherRadius", 3).toInt();

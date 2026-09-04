@@ -202,6 +202,8 @@ void Launcher::parseCommandLine() {
             forceNoGui = true;
         } else if (string("--average") == argv[i]) {
             saveOptions.averageSamples = true;
+        } else if (string("--no-average") == argv[i]) {
+            saveOptions.averageSamples = false;
         } else if (string("--preserve-exposure") == argv[i]) {
             saveOptions.preserveExposure = true;
         } else if (string("--deghost") == argv[i]) {
@@ -317,7 +319,8 @@ void Launcher::showHelp() {
     cout << "    " << "              - %od: " << tr("Replaced by the directory name of the output file.") << endl;
     cout << "    " << "-r radius     " << tr("Mask blur radius, to soften transitions between images. Default is 3 pixels.") << endl;
     cout << "    " << "--deghost N   " << tr("Experimental motion detection threshold from 1 to 100 percent.") << endl;
-    cout << "    " << "--average     " << tr("Average valid exposures for additional noise reduction.") << endl;
+    cout << "    " << "--average     " << tr("Combine consistent exposures for noise reduction (default).") << endl;
+    cout << "    " << "--no-average  " << tr("Use only the exposure selected by the mask.") << endl;
     cout << "    " << "--preserve-exposure " << tr("Keep consistent output exposure across bracketed sets.") << endl;
     cout << "    " << "-p size       " << tr("Preview size. Can be full, half or none.") << endl;
     cout << "    " << "-v            " << tr("Verbose mode.") << endl;

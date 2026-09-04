@@ -26,32 +26,22 @@
 #include "Log.hpp"
 #include "RawParameters.hpp"
 #include "CfaAlignment.hpp"
-#include <array>
+#include <algorithm>
 #include <cmath>
+#include <vector>
 using namespace std;
 using namespace hdrmerge;
 
 namespace {
 
-constexpr int ratioHistogramBins = 1024;
-constexpr double minChannelRatio = 0.5;
-constexpr double maxChannelRatio = 2.0;
-
-struct RatioHistogram {
-    std::array<std::array<size_t, ratioHistogramBins>, 4> bins{};
-    std::array<size_t, 4> samples{};
-};
-
-int ratioBin(double ratio) {
-    const double position = (ratio - minChannelRatio) /
-                            (maxChannelRatio - minChannelRatio);
-    return std::max(0, std::min(ratioHistogramBins - 1,
-        static_cast<int>(position * ratioHistogramBins)));
-}
-
-double binRatio(int bin) {
-    const double position = (bin + 0.5) / ratioHistogramBins;
-    return minChannelRatio + (maxChannelRatio - minChannelRatio) * position;
+double median(vector<double> values) {
+    if (values.empty()) return 0.0;
+    const size_t middle = values.size() / 2;
+    nth_element(values.begin(), values.begin() + middle, values.end());
+    const double upper = values[middle];
+    if (values.size() & 1) return upper;
+    nth_element(values.begin(), values.begin() + middle - 1, values.begin() + middle);
+    return 0.5 * (values[middle - 1] + upper);
 }
 
 } // namespace
@@ -82,7 +72,6 @@ void Image::buildImage(uint16_t * rawImage, const RawParameters & params) {
     }
     brightness /= size;
     cfaPattern = params.FC;
-    channelScale.fill(1.0);
     response.setLinear(params.max == 0 ? 1.0 : 65535.0 / params.max);
     subtractBlack(params);
 }
@@ -97,7 +86,6 @@ Image & Image::operator=(Image && move) {
     brightness = move.brightness;
     response = move.response;
     cfaPattern = move.cfaPattern;
-    channelScale = move.channelScale;
     halfLightPercent = move.halfLightPercent;
     validity = std::move(move.validity);
     warped = move.warped;
@@ -135,136 +123,96 @@ double Image::getRelativeExposure() const {
 }
 
 
-void Image::computeResponseFunction(const Image & r) {
+void Image::setRelativeExposure(double scale) {
+    response.setLinear(scale);
+}
+
+
+Image::ExposureRatioEstimate Image::estimateExposureRatio(const Image & r) const {
+    ExposureRatioEstimate estimate;
     const int left = std::max(dx, r.dx);
     const int top = std::max(dy, r.dy);
     const int right = std::min(dx + static_cast<int>(width), r.dx + static_cast<int>(r.width));
     const int bottom = std::min(dy + static_cast<int>(height), r.dy + static_cast<int>(r.height));
+    if (left >= right || top >= bottom) return estimate;
 
-    channelScale.fill(1.0);
+    // Equal-area tiles prevent a moving or highly textured region from
+    // dominating the exposure estimate. Sampling is capped for large raws.
+    const int grid = 16;
+    const int tileWidth = std::max(1, (right - left + grid - 1) / grid);
+    const int tileHeight = std::max(1, (bottom - top + grid - 1) / grid);
+    const double area = static_cast<double>(right - left) * (bottom - top);
+    const int stride = std::max(1, static_cast<int>(std::sqrt(area / 300000.0)));
+    const double noiseFloor = std::max(32.0, 0.002 * std::min(satThreshold, r.satThreshold));
+    const double thisSafeMax = 0.90 * satThreshold;
+    const double referenceSafeMax = 0.90 * r.satThreshold;
+    vector<double> tileRatios;
+    vector<size_t> tileSamples;
 
-    // Get average relative values between this image and the last one
-    std::vector<std::pair<int, double>> histogram(max + 1);
-    for (auto & i : histogram) i = { 0, 0.0 };
-    #pragma omp parallel
-    {
-        // use one histogram per thread
-        std::vector<std::pair<int, double>> histogramThr(max + 1);
-        for (auto & i : histogramThr) i = { 0, 0.0 };
-        #pragma omp for nowait
-        for (int y = top; y < bottom; ++y) {
-            for (int x = left; x < right; ++x) {
-                if (!contains(x, y) || !r.contains(x, y)) continue;
-                uint16_t v = (*this)(x, y);
-                uint16_t nv = r(x, y);
-                if (v >= nv && v < satThreshold) {
-                    histogramThr[v].first++;
-                    histogramThr[v].second += r.exposureAt(x, y);
+    for (int tileY = top; tileY < bottom; tileY += tileHeight) {
+        const int tileBottom = std::min(bottom, tileY + tileHeight);
+        for (int tileX = left; tileX < right; tileX += tileWidth) {
+            const int tileRight = std::min(right, tileX + tileWidth);
+            vector<double> ratios;
+            ratios.reserve((tileRight - tileX) * (tileBottom - tileY) /
+                           std::max(1, stride * stride));
+            for (int y = tileY; y < tileBottom; y += stride) {
+                for (int x = tileX; x < tileRight; x += stride) {
+                    if (!contains(x, y) || !r.contains(x, y)) continue;
+                    const int color = cfaPattern(x - dx, y - dy);
+                    const int referenceColor = r.cfaPattern(x - r.dx, y - r.dy);
+                    if (color != referenceColor) continue;
+                    const double value = (*this)(x, y);
+                    const double reference = r(x, y);
+                    if (value <= noiseFloor || reference <= noiseFloor ||
+                        value >= thisSafeMax || reference >= referenceSafeMax) continue;
+                    ratios.push_back(std::log(reference / value));
                 }
             }
-        }
-        #pragma omp critical
-        {
-            // join per thread histogram to global one
-            for(int i=0;i<max+1;i++) {
-                histogram[i].first += histogramThr[i].first;
-                histogram[i].second += histogramThr[i].second;
+            if (ratios.size() >= 12) {
+                tileSamples.push_back(ratios.size());
+                tileRatios.push_back(median(std::move(ratios)));
             }
         }
     }
-    alglib::real_1d_array values, adjValues;
-    values.setlength(max);
-    adjValues.setlength(max);
-    values[0] = 0;
-    adjValues[0] = 0;
-    int i = 1;
-    for (int v = max - 1; v >= max*0.75; --v) {
-        if (histogram[v].first > 2) {
-            values[i] = v;
-            adjValues[i] = histogram[v].second / histogram[v].first;
-            ++i;
-        }
+    if (tileRatios.size() < 3) return estimate;
+
+    double centre = median(tileRatios);
+    vector<double> deviations;
+    deviations.reserve(tileRatios.size());
+    for (double ratio : tileRatios) deviations.push_back(std::abs(ratio - centre));
+    const double sigma = std::max(0.001, 1.4826 * median(std::move(deviations)));
+
+    // One Huber refinement improves sub-percent precision while retaining the
+    // tile median's resistance to motion and local illumination changes.
+    double weighted = 0.0;
+    double weights = 0.0;
+    size_t usedSamples = 0;
+    size_t usedTiles = 0;
+    const double cutoff = 2.5 * sigma;
+    for (size_t i = 0; i < tileRatios.size(); ++i) {
+        const double residual = std::abs(tileRatios[i] - centre);
+        if (residual > 6.0 * sigma) continue;
+        const double weight = residual > cutoff ? cutoff / residual : 1.0;
+        weighted += weight * tileRatios[i];
+        weights += weight;
+        usedSamples += tileSamples[i];
+        ++usedTiles;
     }
-    if (i >= max/8) {
-        alglib::ae_int_t info;
-        alglib::spline1dfitreport rep;
-        alglib::spline1dfitpenalized(values, adjValues, i, 200, 3, info, response.nonLinear, rep);
-        response.linear = alglib::spline1dcalc(response.nonLinear, response.threshold) / response.threshold;
-    } else {
-        response.threshold = 65535;
-        // Fallback method for dark images:
-        // Minimize square error between images:
-        // min. C(n) = sum(n*f(x) - g(x))^2  ->  n = sum(f(x)*g(x)) / sum(f(x)^2)
-        double numerator = 0, denom = 0;
-        for (int y = top; y < bottom; ++y) {
-            for (int x = left; x < right; ++x) {
-                if (!contains(x, y) || !r.contains(x, y)) continue;
-                double v = (*this)(x, y);
-                double nv = r(x, y);
-                if (v >= nv && v < satThreshold) {
-                    numerator += v * r.exposureAt(x, y);
-                    denom += v * v;
-                }
-            }
-        }
-        if (denom > 0.0) response.linear = numerator / denom;
-    }
+    if (usedTiles < 3 || weights <= 0.0) return estimate;
 
-    // A shared response curve can leave small colour-dependent residuals.
-    // At an exposure seam the demosaicer interprets those residuals as false
-    // colour, so estimate a robust multiplicative correction per CFA channel.
-    RatioHistogram ratios;
-    const uint16_t noiseFloor = 64;
-    #pragma omp parallel
-    {
-        RatioHistogram local;
-        #pragma omp for nowait
-        for (int y = top; y < bottom; ++y) {
-            for (int x = left; x < right; ++x) {
-                if (!contains(x, y) || !r.contains(x, y)) continue;
-                const uint16_t raw = (*this)(x, y);
-                const uint16_t referenceRaw = r(x, y);
-                if (raw <= noiseFloor || referenceRaw <= noiseFloor ||
-                    raw >= satThreshold || referenceRaw >= r.satThreshold) continue;
+    estimate.logRatio = weighted / weights;
+    estimate.tiles = usedTiles;
+    estimate.samples = usedSamples;
+    estimate.weight = usedTiles / (sigma * sigma);
+    return estimate;
+}
 
-                const int color = cfaPattern(x - dx, y - dy);
-                const int referenceColor = r.cfaPattern(x - r.dx, y - r.dy);
-                if (color != referenceColor) continue;
 
-                const double mapped = response(raw);
-                const double reference = r.exposureAt(x, y);
-                if (mapped <= 0.0 || reference <= 0.0) continue;
-                const double ratio = reference / mapped;
-                if (ratio < minChannelRatio || ratio > maxChannelRatio) continue;
-
-                ++local.bins[color][ratioBin(ratio)];
-                ++local.samples[color];
-            }
-        }
-        #pragma omp critical
-        {
-            for (int color = 0; color < 4; ++color) {
-                ratios.samples[color] += local.samples[color];
-                for (int bin = 0; bin < ratioHistogramBins; ++bin)
-                    ratios.bins[color][bin] += local.bins[color][bin];
-            }
-        }
-    }
-
-    for (int color = 0; color < 4; ++color) {
-        if (ratios.samples[color] < 64) continue;
-        const size_t middle = (ratios.samples[color] + 1) / 2;
-        size_t cumulative = 0;
-        for (int bin = 0; bin < ratioHistogramBins; ++bin) {
-            cumulative += ratios.bins[color][bin];
-            if (cumulative >= middle) {
-                channelScale[color] = binRatio(bin);
-                break;
-            }
-        }
-    }
-    Log::debug("CFA response scales: ", channelScale[0], ", ", channelScale[1], ", ",
-               channelScale[2], ", ", channelScale[3]);
+void Image::computeResponseFunction(const Image & r) {
+    const ExposureRatioEstimate estimate = estimateExposureRatio(r);
+    if (estimate.valid())
+        setRelativeExposure(r.getRelativeExposure() * std::exp(estimate.logRatio));
 }
 
 
@@ -417,4 +365,15 @@ uint16_t Image::getMaxAround(size_t x, size_t y) const {
         }
     }
     return result;
+}
+
+
+double Image::saturationWeightAround(size_t x, size_t y) const {
+    if (satThreshold == 0) return 0.0;
+    const double value = getMaxAround(x, y);
+    const double fadeStart = 0.85 * satThreshold;
+    if (value <= fadeStart) return 1.0;
+    if (value >= satThreshold) return 0.0;
+    const double remaining = (satThreshold - value) / (satThreshold - fadeStart);
+    return remaining * remaining * (3.0 - 2.0 * remaining);
 }

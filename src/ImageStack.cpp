@@ -21,7 +21,9 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
+#include <vector>
 
 #include "BoxBlur.hpp"
 #include "ImageStack.hpp"
@@ -34,6 +36,76 @@
 
 using namespace std;
 using namespace hdrmerge;
+
+namespace {
+
+struct ExposureEdge {
+    size_t first;
+    size_t second;
+    double difference;
+    double weight;
+    double robustWeight;
+};
+
+bool solveExposureSystem(size_t imageCount, const vector<ExposureEdge> & edges,
+                         vector<double> & solution) {
+    const size_t unknowns = imageCount - 1; // The darkest image anchors the scale.
+    vector<vector<double>> matrix(unknowns, vector<double>(unknowns, 0.0));
+    vector<double> rhs(unknowns, 0.0);
+    for (const ExposureEdge & edge : edges) {
+        const double weight = edge.weight * edge.robustWeight;
+        if (edge.first < unknowns) {
+            matrix[edge.first][edge.first] += weight;
+            rhs[edge.first] += weight * edge.difference;
+        }
+        if (edge.second < unknowns) {
+            matrix[edge.second][edge.second] += weight;
+            rhs[edge.second] -= weight * edge.difference;
+        }
+        if (edge.first < unknowns && edge.second < unknowns) {
+            matrix[edge.first][edge.second] -= weight;
+            matrix[edge.second][edge.first] -= weight;
+        }
+    }
+
+    for (size_t column = 0; column < unknowns; ++column) {
+        size_t pivot = column;
+        for (size_t row = column + 1; row < unknowns; ++row)
+            if (std::abs(matrix[row][column]) > std::abs(matrix[pivot][column])) pivot = row;
+        if (std::abs(matrix[pivot][column]) < 1e-12) return false;
+        if (pivot != column) {
+            std::swap(matrix[pivot], matrix[column]);
+            std::swap(rhs[pivot], rhs[column]);
+        }
+        const double divisor = matrix[column][column];
+        for (size_t c = column; c < unknowns; ++c) matrix[column][c] /= divisor;
+        rhs[column] /= divisor;
+        for (size_t row = 0; row < unknowns; ++row) {
+            if (row == column) continue;
+            const double factor = matrix[row][column];
+            for (size_t c = column; c < unknowns; ++c)
+                matrix[row][c] -= factor * matrix[column][c];
+            rhs[row] -= factor * rhs[column];
+        }
+    }
+    solution.assign(imageCount, 0.0);
+    std::copy(rhs.begin(), rhs.end(), solution.begin());
+    return true;
+}
+
+double medianAbsoluteResidual(const vector<ExposureEdge> & edges,
+                              const vector<double> & solution) {
+    vector<double> residuals;
+    residuals.reserve(edges.size());
+    for (const ExposureEdge & edge : edges)
+        residuals.push_back(std::abs(solution[edge.first] - solution[edge.second] - edge.difference));
+    if (residuals.empty()) return 0.0;
+    const size_t middle = residuals.size() / 2;
+    nth_element(residuals.begin(), residuals.begin() + middle, residuals.end());
+    return residuals[middle];
+}
+
+} // namespace
 
 
 int ImageStack::addImage(Image && i) {
@@ -106,16 +178,22 @@ void ImageStack::calculateSaturationLevel(const RawParameters & params, bool use
 
 
     uint16_t maxPerColors = 0;
-    uint16_t channelSafeMax = std::numeric_limits<uint16_t>::max();
     for (int c = 0; c < params.colors; ++c) {
         maxPerColors = std::max(maxPerColors, maxPerColor[c]);
-        if (maxPerColor[c] > 0) channelSafeMax = std::min(channelSafeMax, maxPerColor[c]);
+        Log::debug("Observed white candidate for channel ", c, ": ", maxPerColor[c]);
     }
-    if (channelSafeMax == std::numeric_limits<uint16_t>::max()) channelSafeMax = maxPerColors;
-    satThreshold = params.max == 0 ? channelSafeMax : std::min(params.max, channelSafeMax);
 
-    if(maxPerColors > 0) {
-        satThreshold = std::min(satThreshold, channelSafeMax);
+    // Image data has already had its per-channel black level removed. Trust
+    // LibRaw's camera white level in that same domain; a flat scene region is
+    // not evidence of clipping. An observed plateau may refine it only when it
+    // is already close enough to the metadata value to plausibly be clipping.
+    const uint16_t metadataWhite = params.max > params.maxBlack
+        ? params.max - params.maxBlack : params.max;
+    satThreshold = metadataWhite > 0 ? metadataWhite : maxPerColors;
+    if (metadataWhite > 0 && maxPerColors >= 0.90 * metadataWhite)
+        satThreshold = std::min(metadataWhite, maxPerColors);
+    else if (metadataWhite == 0) {
+        satThreshold = maxPerColors;
     }
 
     if (!useCustomWl) { // only scale when no custom white level was specified
@@ -235,8 +313,46 @@ void ImageStack::crop() {
 
 void ImageStack::computeResponseFunctions() {
     Timer t("Compute response functions");
-    for (int i = images.size() - 2; i >= 0; --i) {
-        images[i].computeResponseFunction(images[i + 1]);
+    if (images.size() < 2) return;
+
+    vector<ExposureEdge> edges;
+    for (size_t i = 0; i + 1 < images.size(); ++i) {
+        for (size_t j = i + 1; j < images.size(); ++j) {
+            const Image::ExposureRatioEstimate estimate = images[i].estimateExposureRatio(images[j]);
+            if (!estimate.valid()) continue;
+            edges.push_back({i, j, estimate.logRatio,
+                             std::min(1e8, estimate.weight), 1.0});
+            Log::debug("Exposure pair ", i, " -> ", j, ": ",
+                       std::exp(-estimate.logRatio), "x from ", estimate.tiles,
+                       " tiles and ", estimate.samples, " samples");
+        }
+    }
+
+    vector<double> relativeLogs;
+    if (!solveExposureSystem(images.size(), edges, relativeLogs)) {
+        Log::debug("Global exposure graph is incomplete; using adjacent robust estimates");
+        for (int i = static_cast<int>(images.size()) - 2; i >= 0; --i)
+            images[i].computeResponseFunction(images[i + 1]);
+        return;
+    }
+
+    // A few IRLS passes suppress a pair whose overlap disagrees with the rest
+    // of the stack, while retaining all consistent constraints.
+    for (int iteration = 0; iteration < 4 && edges.size() > 2; ++iteration) {
+        const double scale = std::max(0.001, 1.4826 * medianAbsoluteResidual(edges, relativeLogs));
+        const double cutoff = 2.5 * scale;
+        for (ExposureEdge & edge : edges) {
+            const double residual = std::abs(relativeLogs[edge.first] -
+                                             relativeLogs[edge.second] - edge.difference);
+            edge.robustWeight = residual > cutoff ? cutoff / residual : 1.0;
+        }
+        if (!solveExposureSystem(images.size(), edges, relativeLogs)) break;
+    }
+
+    const double anchor = images.back().getRelativeExposure();
+    for (size_t i = 0; i < images.size(); ++i) {
+        images[i].setRelativeExposure(anchor * std::exp(relativeLogs[i]));
+        Log::debug("Global response scale ", i, ": ", images[i].getRelativeExposure());
     }
 }
 
@@ -536,6 +652,7 @@ namespace {
 struct RadianceSample {
     double value;
     double variance;
+    double saturationWeight;
 };
 
 static double median(std::vector<double> values) {
@@ -553,7 +670,9 @@ static double robustRadianceAverage(const std::vector<Image> & images, size_t fi
     values.reserve(images.size() - first);
 
     for (size_t k = first; k < images.size(); ++k) {
-        if (!images[k].contains(x, y) || images[k].isSaturatedAround(x, y)) continue;
+        if (!images[k].contains(x, y)) continue;
+        const double saturationWeight = images[k].saturationWeightAround(x, y);
+        if (saturationWeight <= 0.0) continue;
         const double raw = std::max(1.0, static_cast<double>(images[k](x, y)));
         const double value = images[k].exposureAt(x, y);
         // Generic Poisson-Gaussian sensor model. The constant represents a
@@ -562,36 +681,33 @@ static double robustRadianceAverage(const std::vector<Image> & images, size_t fi
         double responseScale = std::abs(value) / raw;
         if (responseScale < 1e-9) responseScale = std::abs(images[k].getRelativeExposure());
         const double variance = std::max(1e-6, responseScale * responseScale * (raw + 16.0));
-        samples.push_back({value, variance});
+        samples.push_back({value, variance, saturationWeight});
         values.push_back(value);
     }
     if (samples.size() < 2) return samples.empty() ? fallback : samples.front().value;
 
     const double centre = median(values);
-    std::vector<double> deviations;
-    std::vector<double> variances;
-    deviations.reserve(samples.size());
-    variances.reserve(samples.size());
-    for (const auto & sample : samples) {
-        deviations.push_back(std::abs(sample.value - centre));
-        variances.push_back(sample.variance);
-    }
-    const double robustSigma = 1.4826 * median(deviations);
-    const double sensorSigma = std::sqrt(median(variances));
-    const double cutoff = 4.685 * std::max(robustSigma, sensorSigma);
+    const RadianceSample * anchor = &samples.front();
+    for (const auto & sample : samples)
+        if (std::abs(sample.value - centre) < std::abs(anchor->value - centre)) anchor = &sample;
 
     double weighted = 0.0;
     double weights = 0.0;
+    size_t accepted = 0;
     for (const auto & sample : samples) {
-        const double residual = std::abs(sample.value - centre);
+        const double residual = std::abs(sample.value - anchor->value);
+        const double signal = std::max(1.0, std::max(std::abs(sample.value),
+                                                     std::abs(anchor->value)));
+        const double cutoff = 5.0 * std::sqrt(sample.variance + anchor->variance) + 0.01 * signal;
         const double u = cutoff > 0.0 ? residual / cutoff : 0.0;
         if (u >= 1.0) continue;
         const double robust = (1.0 - u*u) * (1.0 - u*u); // Tukey biweight
-        const double weight = robust / sample.variance;
+        const double weight = sample.saturationWeight * robust / sample.variance;
         weighted += sample.value * weight;
         weights += weight;
+        ++accepted;
     }
-    return weights > 0.0 ? weighted / weights : fallback;
+    return accepted >= 2 && weights > 0.0 ? weighted / weights : fallback;
 }
 
 } // namespace
@@ -604,10 +720,9 @@ Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadi
     dst.displace(-(int)params.leftMargin, -(int)params.topMargin);
     dst.fillBorders(0.f);
 
-    Array2D<float> numerator(width, height), weightSum(width, height), selectedWeight(width, height);
+    Array2D<float> numerator(width, height), weightSum(width, height);
     std::fill_n(&numerator[0], width*height, 0.0f);
     std::fill_n(&weightSum[0], width*height, 0.0f);
-    std::fill_n(&selectedWeight[0], width*height, 0.0f);
 
     const size_t minDimension = std::min(width, height);
     const int safeRadius = minDimension > 2
@@ -653,7 +768,6 @@ Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadi
                 if (weight <= 1e-7) continue;
                 numerator(x, y) += static_cast<float>(weight * value);
                 weightSum(x, y) += static_cast<float>(weight);
-                if (layer == chosen) selectedWeight(x, y) = static_cast<float>(weight);
             }
         }
     }
@@ -680,9 +794,8 @@ Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadi
 
                 const bool automaticMotion = motionMask.size() == mask.size() && motionMask(x, y) &&
                                              chosen == origMask(x, y);
-                const double selectionConfidence = weightSum(x, y) > 0.0f
-                    ? selectedWeight(x, y) / weightSum(x, y) : 1.0;
-                if (averageSamples && !automaticMotion && selectionConfidence >= 0.98) {
+                const bool manuallySelected = chosen != origMask(x, y);
+                if (averageSamples && !automaticMotion && !manuallySelected) {
                     const size_t firstValid = std::max<size_t>(chosen, origMask(x, y));
                     value = robustRadianceAverage(images, firstValid, x, y, value);
                 }
