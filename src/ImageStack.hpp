@@ -51,7 +51,8 @@ public:
     void generateMask(int deghostThreshold = 0);
     Array2D<float> compose(const RawParameters & md, int featherRadius,
                            FusionMode fusionMode = FusionMode::Robust,
-                           bool preserveExposure = false) const;
+                           bool preserveExposure = false,
+                           Array2D<float> * fusionConfidence = nullptr) const;
 
     size_t size() const { return images.size(); }
 

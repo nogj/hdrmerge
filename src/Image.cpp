@@ -88,7 +88,6 @@ Image & Image::operator=(Image && move) {
     cfaPattern = move.cfaPattern;
     halfLightPercent = move.halfLightPercent;
     validity = std::move(move.validity);
-    interpolationVariance = std::move(move.interpolationVariance);
     warped = move.warped;
     alignmentX = move.alignmentX;
     alignmentY = move.alignmentY;
@@ -128,32 +127,6 @@ double Image::getRelativeExposure() const {
 void Image::setRelativeExposure(double scale, double scatter) {
     response.setLinear(scale);
     responseScatter = std::max(0.0, scatter);
-}
-
-
-double Image::radianceGradientSquared(size_t x, size_t y) const {
-    const int ix = static_cast<int>(x);
-    const int iy = static_cast<int>(y);
-    double gx = 0.0, gy = 0.0;
-    if (contains(ix - 2, iy) && contains(ix + 2, iy))
-        gx = (exposureAt(x + 2, y) - exposureAt(x - 2, y)) * 0.25;
-    else if (contains(ix + 2, iy))
-        gx = (exposureAt(x + 2, y) - exposureAt(x, y)) * 0.5;
-    else if (contains(ix - 2, iy))
-        gx = (exposureAt(x, y) - exposureAt(x - 2, y)) * 0.5;
-
-    if (contains(ix, iy - 2) && contains(ix, iy + 2))
-        gy = (exposureAt(x, y + 2) - exposureAt(x, y - 2)) * 0.25;
-    else if (contains(ix, iy + 2))
-        gy = (exposureAt(x, y + 2) - exposureAt(x, y)) * 0.5;
-    else if (contains(ix, iy - 2))
-        gy = (exposureAt(x, y) - exposureAt(x, y - 2)) * 0.5;
-    return gx * gx + gy * gy;
-}
-
-
-double Image::interpolationVarianceAt(size_t x, size_t y) const {
-    return warped && interpolationVariance.contains(x, y) ? interpolationVariance(x, y) : 0.0;
 }
 
 
@@ -311,14 +284,7 @@ bool Image::refineAlignment(const Image & reference, const RawParameters & param
         return false;
     }
 
-    Array2D<uint16_t> resampled;
-    Array2D<uint8_t> validMap;
-    Array2D<float> interpolationMap;
-    resampleCfa(*this, resampled, validMap, params.FC, transform, &interpolationMap);
-    *static_cast<Array2D<uint16_t> *>(this) = std::move(resampled);
-    validity = std::move(validMap);
-    interpolationVariance = std::move(interpolationMap);
-    warped = true;
+    applyAlignmentTransform(params, transform);
     alignmentX = transform.placementX();
     alignmentY = transform.placementY();
     alignmentConfidence = transform.confidence;
@@ -326,6 +292,17 @@ bool Image::refineAlignment(const Image & reference, const RawParameters & param
         3.14159265358979323846;
     reason = transform.message;
     return true;
+}
+
+
+void Image::applyAlignmentTransform(const RawParameters & params,
+                                    const AlignmentTransform & transform) {
+    Array2D<uint16_t> resampled;
+    Array2D<uint8_t> validMap;
+    resampleCfa(*this, resampled, validMap, params.FC, transform);
+    *static_cast<Array2D<uint16_t> *>(this) = std::move(resampled);
+    validity = std::move(validMap);
+    warped = true;
 }
 
 
@@ -338,7 +315,6 @@ bool Image::contains(int x, int y) const {
 void Image::displace(int newDx, int newDy) {
     Array2D<uint16_t>::displace(newDx, newDy);
     if (warped) validity.displace(newDx, newDy);
-    if (warped) interpolationVariance.displace(newDx, newDy);
 }
 
 

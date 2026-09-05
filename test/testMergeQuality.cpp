@@ -5,6 +5,7 @@
 
 #include "../src/ImageStack.hpp"
 #include "../src/RawParameters.hpp"
+#include "../src/CfaAlignment.hpp"
 
 using namespace hdrmerge;
 
@@ -34,6 +35,17 @@ Image makeImage(const std::vector<uint16_t> & pixels, const RawParameters & para
 bool check(bool condition, const char * message) {
     if (!condition) std::cerr << "FAILED: " << message << std::endl;
     return condition;
+}
+
+double deterministicNoise(size_t x, size_t y, uint32_t frame) {
+    uint32_t state = static_cast<uint32_t>(x * 73856093u) ^
+                     static_cast<uint32_t>(y * 19349663u) ^ (frame * 83492791u);
+    double sum = 0.0;
+    for (int i = 0; i < 12; ++i) {
+        state = state * 1664525u + 1013904223u;
+        sum += static_cast<double>(state & 0xffffu) / 65536.0;
+    }
+    return sum - 6.0;
 }
 
 } // namespace
@@ -262,6 +274,107 @@ int main() {
                     "isolated noise was classified as coherent motion");
         ok &= check(stack.getImageAt(15, 13) == 1,
                     "spatially supported motion did not select the reference exposure");
+    }
+
+    // A smooth low-signal field must not acquire a spatially periodic noise
+    // envelope when independently noisy CFA frames are registered and fused.
+    {
+        const size_t fieldWidth = 256, fieldHeight = 192;
+        RawParameters fieldParams = makeParameters(fieldWidth, fieldHeight);
+        const double radiance = 500.0;
+        const double exposures[] = {8.0, 4.0, 1.0};
+        ImageStack stack;
+        for (uint32_t frame = 0; frame < 3; ++frame) {
+            std::vector<uint16_t> pixels(fieldWidth * fieldHeight);
+            const double signal = exposures[frame] * radiance;
+            const double sigma = std::sqrt(signal + 16.0);
+            for (size_t y = 0; y < fieldHeight; ++y) {
+                for (size_t x = 0; x < fieldWidth; ++x) {
+                    const double value = signal + sigma * deterministicNoise(x, y, frame + 1);
+                    pixels[y*fieldWidth + x] = static_cast<uint16_t>(
+                        std::max(0.0, std::min(65535.0, std::round(value))));
+                }
+            }
+            stack.addImage(makeImage(pixels, fieldParams));
+        }
+        for (size_t frame = 0; frame < 3; ++frame)
+            stack.getImage(frame).setRelativeExposure(1.0 / exposures[frame]);
+
+        AlignmentTransform transform;
+        transform.valid = true;
+        const double angle = 0.8 * 3.14159265358979323846 / 180.0;
+        transform.m[0][0] = std::cos(angle);
+        transform.m[0][1] = -std::sin(angle);
+        transform.m[1][0] = std::sin(angle);
+        transform.m[1][1] = std::cos(angle);
+        transform.m[0][2] = 0.45;
+        transform.m[1][2] = -0.30;
+        stack.getImage(0).applyAlignmentTransform(fieldParams, transform);
+        transform.m[0][2] = -0.35;
+        transform.m[1][2] = 0.40;
+        stack.getImage(1).applyAlignmentTransform(fieldParams, transform);
+        stack.generateMask();
+
+        const FusionMode modes[] = {FusionMode::Robust, FusionMode::Legacy, FusionMode::Off};
+        const char * names[] = {"robust", "legacy", "off"};
+        double modeMse[3] = {0.0, 0.0, 0.0};
+        for (size_t mode = 0; mode < 3; ++mode) {
+            Array2D<float> confidence;
+            Array2D<float> result = stack.compose(fieldParams, 0, modes[mode], true,
+                mode == 0 ? &confidence : nullptr);
+            double minMse = 1e30, maxMse = 0.0, meanMse = 0.0;
+            size_t blocks = 0;
+            for (size_t by = 24; by + 16 <= fieldHeight - 24; by += 16) {
+                for (size_t bx = 24; bx + 16 <= fieldWidth - 24; bx += 16) {
+                    double mse = 0.0;
+                    for (size_t y = by; y < by + 16; y += 2)
+                        for (size_t x = bx; x < bx + 16; x += 2) {
+                            const double error = result(x, y) - radiance;
+                            mse += error * error;
+                        }
+                    mse /= 64.0;
+                    minMse = std::min(minMse, mse);
+                    maxMse = std::max(maxMse, mse);
+                    meanMse += mse;
+                    ++blocks;
+                }
+            }
+            meanMse /= blocks;
+            modeMse[mode] = meanMse;
+            std::cout << "Synthetic " << names[mode] << " field block MSE: min=" << minMse
+                      << " mean=" << meanMse << " max=" << maxMse << std::endl;
+            if (mode == 0) {
+                double confidenceSum = 0.0, confidenceSquared = 0.0;
+                double neighborDifference = 0.0;
+                size_t count = 0, neighborCount = 0;
+                for (size_t y = 24; y < fieldHeight - 24; ++y) {
+                    for (size_t x = 24; x < fieldWidth - 24; ++x) {
+                        const double value = confidence(x, y);
+                        confidenceSum += value;
+                        confidenceSquared += value * value;
+                        ++count;
+                        if (x + 2 < fieldWidth - 24) {
+                            neighborDifference += std::abs(value - confidence(x + 2, y));
+                            ++neighborCount;
+                        }
+                    }
+                }
+                const double confidenceMean = confidenceSum / count;
+                const double confidenceSd = std::sqrt(std::max(0.0,
+                    confidenceSquared / count - confidenceMean * confidenceMean));
+                std::cout << "Synthetic robust confidence: mean=" << confidenceMean
+                          << " sd=" << confidenceSd
+                          << " neighbor-delta=" << neighborDifference / neighborCount << std::endl;
+                ok &= check(confidenceMean > 0.99,
+                            "smooth registered field lost robust fusion support");
+                ok &= check(neighborDifference / neighborCount < 0.01,
+                            "robust confidence acquired CFA-locked spatial variation");
+            }
+        }
+        ok &= check(modeMse[0] <= 1.05 * modeMse[1],
+                    "robust fusion is noisier than legacy fusion on a smooth field");
+        ok &= check(modeMse[0] < 0.85 * modeMse[2],
+                    "robust fusion did not reduce smooth-field noise");
     }
 
     if (ok) std::cout << "Merge quality tests passed." << std::endl;

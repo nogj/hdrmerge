@@ -742,12 +742,11 @@ static double legacyRadianceAverage(const std::vector<Image> & images, size_t fi
 
 
 static double robustRadianceAverage(const std::vector<Image> & images, size_t first,
-                                    size_t selected, size_t x, size_t y, double fallback) {
+                                    size_t x, size_t y, double fallback,
+                                    double * outputConfidence = nullptr) {
+    if (outputConfidence) *outputConfidence = 0.0;
     std::vector<RadianceSample> samples;
     samples.reserve(images.size() - first);
-    const double selectedInterpolation = images[selected].interpolationVarianceAt(x, y);
-    double selectedGradient = -1.0;
-
     for (size_t k = first; k < images.size(); ++k) {
         if (!images[k].contains(x, y)) continue;
         const double saturationWeight = images[k].saturationWeightAround(x, y);
@@ -762,20 +761,11 @@ static double robustRadianceAverage(const std::vector<Image> & images, size_t fi
         const double sensorVariance = responseScale * responseScale * (raw + 16.0);
         const double responseScatter = images[k].getResponseScatter();
         const double responseVariance = value * value * responseScatter * responseScatter;
-        double alignmentVariance = 0.0;
-        if (k != selected) {
-            const double interpolation = images[k].interpolationVarianceAt(x, y) +
-                                         selectedInterpolation;
-            if (interpolation > 0.0) {
-                if (selectedGradient < 0.0)
-                    selectedGradient = images[selected].radianceGradientSquared(x, y);
-                const double sharedGradient = std::min(images[k].radianceGradientSquared(x, y),
-                                                       selectedGradient);
-                alignmentVariance = interpolation * sharedGradient;
-            }
-        }
-        const double variance = std::max(1e-6, sensorVariance + responseVariance +
-                                               alignmentVariance);
+        // The fractional CFA resampling phase is deterministic, not an
+        // alignment uncertainty. Treating it as one creates phase-locked
+        // weights in otherwise smooth regions; IRLS already rejects genuine
+        // registration disagreements through the radiometric residual.
+        const double variance = std::max(1e-6, sensorVariance + responseVariance);
         const double weight = saturationWeight / variance;
         samples.push_back({value, variance, saturationWeight, weight});
     }
@@ -818,6 +808,7 @@ static double robustRadianceAverage(const std::vector<Image> & images, size_t fi
     centre = weighted / weightSum;
     const double effectiveSamples = weightSum * weightSum / squaredWeightSum;
     const double confidence = std::max(0.0, std::min(1.0, effectiveSamples - 1.0));
+    if (outputConfidence) *outputConfidence = confidence;
     return fallback + confidence * (centre - fallback);
 }
 
@@ -826,11 +817,16 @@ static double robustRadianceAverage(const std::vector<Image> & images, size_t fi
 
 Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadius,
                                    FusionMode fusionMode,
-                                   bool preserveExposure) const {
+                                   bool preserveExposure,
+                                   Array2D<float> * fusionConfidence) const {
     Timer t("Compose");
     Array2D<float> dst(params.rawWidth, params.rawHeight);
     dst.displace(-(int)params.leftMargin, -(int)params.topMargin);
     dst.fillBorders(0.f);
+    if (fusionConfidence) {
+        fusionConfidence->resize(width, height);
+        std::fill_n(&(*fusionConfidence)[0], width*height, 0.0f);
+    }
 
     Array2D<float> numerator(width, height), weightSum(width, height);
     std::fill_n(&numerator[0], width*height, 0.0f);
@@ -909,9 +905,14 @@ Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadi
                 const bool manuallySelected = chosen != origMask(x, y);
                 if (fusionMode != FusionMode::Off && !automaticMotion && !manuallySelected) {
                     const size_t firstValid = std::max<size_t>(chosen, origMask(x, y));
-                    value = fusionMode == FusionMode::Legacy ?
-                        legacyRadianceAverage(images, firstValid, x, y, value) :
-                        robustRadianceAverage(images, firstValid, chosen, x, y, value);
+                    if (fusionMode == FusionMode::Legacy) {
+                        value = legacyRadianceAverage(images, firstValid, x, y, value);
+                    } else {
+                        double confidence = 0.0;
+                        value = robustRadianceAverage(images, firstValid, x, y, value,
+                                                      &confidence);
+                        if (fusionConfidence) (*fusionConfidence)(x, y) = confidence;
+                    }
                 }
 
                 dst(x, y) = static_cast<float>(value);

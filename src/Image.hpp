@@ -38,6 +38,7 @@
 namespace hdrmerge {
 
 class RawParameters;
+struct AlignmentTransform;
 
 class Image : public Array2D<uint16_t> {
 public:
@@ -94,11 +95,11 @@ public:
     double getResponseScatter() const { return responseScatter; }
     ExposureRatioEstimate estimateExposureRatio(const Image & reference) const;
     void setRelativeExposure(double scale, double scatter = 0.0);
-    double radianceGradientSquared(size_t x, size_t y) const;
-    double interpolationVarianceAt(size_t x, size_t y) const;
     size_t alignWith(const Image & r);
     bool refineAlignment(const Image & reference, const RawParameters & params, AlignmentMode mode,
                          std::string & reason);
+    void applyAlignmentTransform(const RawParameters & params,
+                                 const AlignmentTransform & transform);
     void preScale();
     void releaseAlignData() {
         scaled.reset();
@@ -140,7 +141,6 @@ private:
     CFAPattern cfaPattern;
     double halfLightPercent;
     Array2D<uint8_t> validity;
-    Array2D<float> interpolationVariance;
     bool warped;
     double alignmentX;
     double alignmentY;
