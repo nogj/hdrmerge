@@ -24,6 +24,10 @@ procesamiento por lotes, interfaz, automatización CLI y distribución para
 Windows. No debe considerarse todavía una versión estable: conviene conservar
 siempre los RAW originales y comprobar visualmente los resultados importantes.
 
+Para una explicación didáctica y autocontenida del recorrido completo, desde la
+decodificación de los RAW hasta la escritura del DNG, véase
+[`PIPELINE.md`](PIPELINE.md).
+
 ## 2. Principios técnicos
 
 Las decisiones de diseño siguen estos principios:
