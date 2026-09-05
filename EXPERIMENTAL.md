@@ -461,21 +461,26 @@ En regiones estáticas se consideran, desde la primera exposición segura
 seleccionada por la máscara, todas las imágenes que contienen el píxel. Cada
 muestra se transforma al dominio radiométrico común y recibe una confianza de
 saturación según la transición descrita en 6.4. La incertidumbre total combina
-tres términos medibles:
+dos términos medibles:
 
 ```text
 varianza_sensor    ≈ escala_respuesta² · (muestra_RAW + 4²)
 varianza_respuesta ≈ radiancia² · dispersión_log_respuesta²
-varianza_registro  ≈ huella_interpolación · gradiente_CFA²
-varianza_total     = varianza_sensor + varianza_respuesta + varianza_registro
+varianza_total     = varianza_sensor + varianza_respuesta
 ```
 
 El término `4²` es un suelo conservador de ruido de lectura de cuatro unidades
 RAW. No sustituye un perfil medido de la cámara, pero permite ponderar más las
-observaciones con menor ruido estimado. La huella de interpolación vale cero en
-una muestra CFA exacta y aumenta con el desplazamiento fraccionario bilineal. El
-gradiente se calcula entre vecinos de la misma fase Bayer; por ello una pequeña
-incertidumbre geométrica importa poco en una zona plana y mucho en un borde.
+observaciones con menor ruido estimado.
+
+Una revisión posterior retiró un tercer término que multiplicaba la fase
+fraccionaria del remuestreo bilineal por el gradiente CFA. La fase de
+interpolación es determinista y no constituye por sí misma una varianza de
+registro. Tratarla como incertidumbre espacial hacía variar los pesos IRLS con
+la rejilla Bayer, especialmente en gradientes suaves y transformaciones afines,
+y podía convertir ruido ordinario en una textura periódica después del
+demosaicing. Las discrepancias causadas por un registro realmente incorrecto
+continúan limitadas por el residuo radiométrico y los pesos Tukey.
 
 El centro inicial es la mediana ponderada por saturación y varianza. Cuatro
 iteraciones IRLS vuelven a estimarlo mediante pesos Tukey:
@@ -823,6 +828,21 @@ Test #2: merge-quality ... Passed
   permisivo anterior y produce un resultado distinto de `robust`;
 - un punto discrepante aislado y una región discrepante compacta comprueban que
   el primero se trata como ruido y la segunda como movimiento.
+- un campo CFA uniforme con ruido Poisson-Gaussiano, tres exposiciones y dos
+  transformaciones subpíxel afines comprueba que la confianza de `robust` no
+  adquiere una modulación ligada a la rejilla Bayer;
+- en ese campo, `robust` debe mantener una confianza media superior a `0,99`,
+  una diferencia media entre vecinos de la misma fase inferior a `0,01` y un
+  error cuadrático medio no superior al de `legacy` por más de un 5 %;
+- el mismo ensayo exige que `robust` reduzca el error cuadrático medio al menos
+  un 15 % frente a la composición sin fusión.
+
+En la ejecución de referencia de este ensayo, retirar la falsa varianza de
+registro elevó la confianza media de `0,983` a `0,997`, redujo la variación
+entre vecinos CFA de `0,026` a `0,0054` y bajó ligeramente el error cuadrático
+medio de `19,52` a `19,34`. Estas cifras prueban la corrección del mecanismo
+sintético; la desaparición completa del artefacto observado debe confirmarse
+todavía con los RAW que lo reproducen.
 
 ### 17.3. Prueba real subpíxel
 
@@ -980,8 +1000,11 @@ La transformación es global para toda la imagen. No corrige:
 
 El remuestreo CFA utiliza interpolación bilineal dentro de cada fase. Es
 conservadora y evita mezcla cromática, pero puede suavizar ligeramente el
-detalle. Filtros de orden superior requerirían control explícito de ringing,
-valores negativos y altas luces.
+detalle y correlacionar espacialmente parte del ruido. La fusión robusta ya no
+convierte la fase fraccionaria de esta interpolación en una modulación adicional
+de confianza, pero no elimina la correlación inherente al remuestreo. Filtros de
+orden superior requerirían control explícito de ringing, valores negativos y
+altas luces.
 
 ### 20.4. Validación fotográfica
 
