@@ -38,12 +38,16 @@ int main() {
     identity.valid = true;
     Array2D<uint16_t> copied;
     Array2D<uint8_t> copiedValidity;
-    resampleCfa(source, copied, copiedValidity, pattern, identity);
+    Array2D<float> copiedInterpolationVariance;
+    resampleCfa(source, copied, copiedValidity, pattern, identity,
+                &copiedInterpolationVariance);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             const size_t pos = static_cast<size_t>(y) * width + x;
             if (!copiedValidity[pos] || copied[pos] != source[pos])
                 return fail("identity CFA resampling changed a sample");
+            if (copiedInterpolationVariance[pos] != 0.0f)
+                return fail("identity CFA resampling introduced interpolation uncertainty");
         }
     }
 
@@ -58,13 +62,16 @@ int main() {
     affine.m[1][2] = -0.30;
     Array2D<uint16_t> warped;
     Array2D<uint8_t> validity;
-    resampleCfa(source, warped, validity, pattern, affine);
+    Array2D<float> interpolationVariance;
+    resampleCfa(source, warped, validity, pattern, affine, &interpolationVariance);
     size_t validCount = 0;
+    size_t interpolatedCount = 0;
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             const size_t pos = static_cast<size_t>(y) * width + x;
             if (!validity[pos]) continue;
             ++validCount;
+            if (interpolationVariance[pos] > 0.0f) ++interpolatedCount;
             const int phase = (y & 1) * 2 + (x & 1);
             const uint16_t lower = static_cast<uint16_t>(phase * 12000 + 900);
             const uint16_t upper = static_cast<uint16_t>(phase * 12000 + 2000);
@@ -74,6 +81,8 @@ int main() {
     }
     if (validCount < static_cast<size_t>(width * height * 0.85))
         return fail("affine CFA resampling produced an unexpectedly small valid area");
+    if (interpolatedCount < validCount / 2)
+        return fail("fractional CFA resampling did not report its interpolation footprint");
 
     std::cout << "CFA alignment tests passed (" << validCount << " valid affine samples)." << std::endl;
     return 0;

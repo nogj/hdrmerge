@@ -43,6 +43,7 @@ class Image : public Array2D<uint16_t> {
 public:
     struct ExposureRatioEstimate {
         double logRatio = 0.0;
+        double logScatter = 0.0;
         double weight = 0.0;
         size_t samples = 0;
         size_t tiles = 0;
@@ -90,8 +91,11 @@ public:
     }
     double saturationWeightAround(size_t x, size_t y) const;
     double getRelativeExposure() const;
+    double getResponseScatter() const { return responseScatter; }
     ExposureRatioEstimate estimateExposureRatio(const Image & reference) const;
-    void setRelativeExposure(double scale);
+    void setRelativeExposure(double scale, double scatter = 0.0);
+    double radianceGradientSquared(size_t x, size_t y) const;
+    double interpolationVarianceAt(size_t x, size_t y) const;
     size_t alignWith(const Image & r);
     bool refineAlignment(const Image & reference, const RawParameters & params, AlignmentMode mode,
                          std::string & reason);
@@ -136,11 +140,13 @@ private:
     CFAPattern cfaPattern;
     double halfLightPercent;
     Array2D<uint8_t> validity;
+    Array2D<float> interpolationVariance;
     bool warped;
     double alignmentX;
     double alignmentY;
     double alignmentConfidence;
     double alignmentRotation;
+    double responseScatter = 0.0;
 
     void subtractBlack(const RawParameters & params);
     void buildImage(uint16_t * rawImage, const RawParameters & params);

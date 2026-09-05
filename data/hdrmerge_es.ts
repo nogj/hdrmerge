@@ -139,6 +139,22 @@
         <source>Include single images in batch mode (the default is to skip them.)</source>
         <translation type="finished">Incluir imágenes sueltas en modo lote (por defecto se ignoran).</translation>
     </message>
+    <message>
+        <source>Fusion mode: robust (default), legacy, or off.</source>
+        <translation type="finished">Modo de fusión: robust, legacy u off (robust por defecto).</translation>
+    </message>
+    <message>
+        <source>Alias for --fusion robust.</source>
+        <translation type="finished">Alias de --fusion robust.</translation>
+    </message>
+    <message>
+        <source>Alias for --fusion off.</source>
+        <translation type="finished">Alias de --fusion off.</translation>
+    </message>
+    <message>
+        <source>Invalid %1 parameter, using robust.</source>
+        <translation type="finished">Parámetro %1 inválido, se usará robust.</translation>
+    </message>
 </context>
 <context>
     <name>LoadSave</name>
@@ -294,6 +310,26 @@
     <message>
         <source>You can use the following tokens:</source>
         <translation type="finished">Puede utilizar los siguientes símbolos:</translation>
+    </message>
+    <message>
+        <source>Fusion mode:</source>
+        <translation type="finished">Modo de fusión:</translation>
+    </message>
+    <message>
+        <source>Robust (detail preserving)</source>
+        <translation type="finished">Robusta (conserva el detalle)</translation>
+    </message>
+    <message>
+        <source>Legacy (stronger smoothing)</source>
+        <translation type="finished">Heredada (suavizado más intenso)</translation>
+    </message>
+    <message>
+        <source>Off (mask only)</source>
+        <translation type="finished">Desactivada (solo máscara)</translation>
+    </message>
+    <message>
+        <source>Robust protects detail; Legacy retains the previous, stronger average.</source>
+        <translation type="finished">Robusta protege el detalle; Heredada conserva el promedio anterior, más intenso.</translation>
     </message>
 </context>
 <context>

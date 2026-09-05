@@ -34,6 +34,20 @@ enum class AlignmentMode {
     Affine
 };
 
+enum class FusionMode {
+    Off,
+    Legacy,
+    Robust
+};
+
+inline const char * fusionModeName(FusionMode mode) {
+    switch (mode) {
+        case FusionMode::Off: return "off";
+        case FusionMode::Legacy: return "legacy";
+        default: return "robust";
+    }
+}
+
 inline const char * alignmentModeName(AlignmentMode mode) {
     switch (mode) {
         case AlignmentMode::Integer: return "integer";
@@ -66,9 +80,10 @@ struct SaveOptions {
     bool saveMask;
     QString maskFileName;
     int featherRadius;
-    bool averageSamples;
+    FusionMode fusionMode;
     bool preserveExposure;
-    SaveOptions() : bps(16), previewSize(0), saveMask(false), featherRadius(3), averageSamples(true), preserveExposure(false) {}
+    SaveOptions() : bps(16), previewSize(0), saveMask(false), featherRadius(3),
+        fusionMode(FusionMode::Robust), preserveExposure(false) {}
 };
 
 } // namespace hdrmerge

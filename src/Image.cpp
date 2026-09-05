@@ -88,11 +88,13 @@ Image & Image::operator=(Image && move) {
     cfaPattern = move.cfaPattern;
     halfLightPercent = move.halfLightPercent;
     validity = std::move(move.validity);
+    interpolationVariance = std::move(move.interpolationVariance);
     warped = move.warped;
     alignmentX = move.alignmentX;
     alignmentY = move.alignmentY;
     alignmentConfidence = move.alignmentConfidence;
     alignmentRotation = move.alignmentRotation;
+    responseScatter = move.responseScatter;
     return *this;
 }
 
@@ -123,8 +125,35 @@ double Image::getRelativeExposure() const {
 }
 
 
-void Image::setRelativeExposure(double scale) {
+void Image::setRelativeExposure(double scale, double scatter) {
     response.setLinear(scale);
+    responseScatter = std::max(0.0, scatter);
+}
+
+
+double Image::radianceGradientSquared(size_t x, size_t y) const {
+    const int ix = static_cast<int>(x);
+    const int iy = static_cast<int>(y);
+    double gx = 0.0, gy = 0.0;
+    if (contains(ix - 2, iy) && contains(ix + 2, iy))
+        gx = (exposureAt(x + 2, y) - exposureAt(x - 2, y)) * 0.25;
+    else if (contains(ix + 2, iy))
+        gx = (exposureAt(x + 2, y) - exposureAt(x, y)) * 0.5;
+    else if (contains(ix - 2, iy))
+        gx = (exposureAt(x, y) - exposureAt(x - 2, y)) * 0.5;
+
+    if (contains(ix, iy - 2) && contains(ix, iy + 2))
+        gy = (exposureAt(x, y + 2) - exposureAt(x, y - 2)) * 0.25;
+    else if (contains(ix, iy + 2))
+        gy = (exposureAt(x, y + 2) - exposureAt(x, y)) * 0.5;
+    else if (contains(ix, iy - 2))
+        gy = (exposureAt(x, y) - exposureAt(x, y - 2)) * 0.5;
+    return gx * gx + gy * gy;
+}
+
+
+double Image::interpolationVarianceAt(size_t x, size_t y) const {
+    return warped && interpolationVariance.contains(x, y) ? interpolationVariance(x, y) : 0.0;
 }
 
 
@@ -202,6 +231,7 @@ Image::ExposureRatioEstimate Image::estimateExposureRatio(const Image & r) const
     if (usedTiles < 3 || weights <= 0.0) return estimate;
 
     estimate.logRatio = weighted / weights;
+    estimate.logScatter = sigma;
     estimate.tiles = usedTiles;
     estimate.samples = usedSamples;
     estimate.weight = usedTiles / (sigma * sigma);
@@ -212,7 +242,8 @@ Image::ExposureRatioEstimate Image::estimateExposureRatio(const Image & r) const
 void Image::computeResponseFunction(const Image & r) {
     const ExposureRatioEstimate estimate = estimateExposureRatio(r);
     if (estimate.valid())
-        setRelativeExposure(r.getRelativeExposure() * std::exp(estimate.logRatio));
+        setRelativeExposure(r.getRelativeExposure() * std::exp(estimate.logRatio),
+                            std::hypot(r.getResponseScatter(), estimate.logScatter));
 }
 
 
@@ -282,9 +313,11 @@ bool Image::refineAlignment(const Image & reference, const RawParameters & param
 
     Array2D<uint16_t> resampled;
     Array2D<uint8_t> validMap;
-    resampleCfa(*this, resampled, validMap, params.FC, transform);
+    Array2D<float> interpolationMap;
+    resampleCfa(*this, resampled, validMap, params.FC, transform, &interpolationMap);
     *static_cast<Array2D<uint16_t> *>(this) = std::move(resampled);
     validity = std::move(validMap);
+    interpolationVariance = std::move(interpolationMap);
     warped = true;
     alignmentX = transform.placementX();
     alignmentY = transform.placementY();
@@ -305,6 +338,7 @@ bool Image::contains(int x, int y) const {
 void Image::displace(int newDx, int newDy) {
     Array2D<uint16_t>::displace(newDx, newDy);
     if (warped) validity.displace(newDx, newDy);
+    if (warped) interpolationVariance.displace(newDx, newDy);
 }
 
 

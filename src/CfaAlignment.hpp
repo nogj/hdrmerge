@@ -36,7 +36,8 @@ void resampleCfa(const Array2D<uint16_t> & source,
                  Array2D<uint16_t> & destination,
                  Array2D<uint8_t> & validity,
                  const CFAPattern & pattern,
-                 const AlignmentTransform & transform);
+                 const AlignmentTransform & transform,
+                 Array2D<float> * interpolationVariance = nullptr);
 
 } // namespace hdrmerge
 

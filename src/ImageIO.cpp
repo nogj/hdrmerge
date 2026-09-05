@@ -248,7 +248,7 @@ bool ImageIO::save(const SaveOptions & options, ProgressIndicator & progress) {
     params.width = stack.getWidth();
     params.height = stack.getHeight();
     params.adjustWhite(stack.getImage(stack.size() - 1));
-    Array2D<float> composedImage = stack.compose(params, options.featherRadius, options.averageSamples,
+    Array2D<float> composedImage = stack.compose(params, options.featherRadius, options.fusionMode,
                                                   options.preserveExposure);
     params.black = params.maxBlack = 0;
     std::fill_n(params.cblack, 4, 0);

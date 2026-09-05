@@ -351,6 +351,11 @@ pareja incompatible con el resto de la pila. Así no se acumula error al encaden
 exposiciones consecutivas y no se introducen ganancias independientes por canal
 CFA.
 
+La dispersión robusta de las relaciones por tiles y el residuo de cada arista
+respecto a la solución global se conservan como incertidumbre radiométrica de
+cada imagen. No solo se estima cuánto hay que escalar una exposición: también
+se mide hasta qué punto esa escala describe uniformemente el solapamiento.
+
 Si el grafo de relaciones no conecta toda la pila, se emplean como fallback las
 estimaciones robustas entre imágenes adyacentes.
 
@@ -440,45 +445,72 @@ mezclar colores del mosaico.
 
 ## 8. Fusión adaptativa para reducción de ruido
 
-La fusión está activada por defecto. `--average` permite solicitarla
-explícitamente y `--no-average` restaura la composición basada únicamente en la
-selección y el feathering de la máscara.
+La fusión dispone de tres modos seleccionables con `--fusion MODE`:
+
+```text
+robust   nueva IRLS sensible a incertidumbre; predeterminado
+legacy   estimador anterior, más permisivo y con mayor suavizado
+off      composición basada únicamente en selección y feathering
+```
+
+`--average` se conserva como alias de `--fusion robust` y `--no-average` como
+alias de `--fusion off`, de modo que los scripts existentes mantienen su
+comportamiento previsto.
 
 En regiones estáticas se consideran, desde la primera exposición segura
 seleccionada por la máscara, todas las imágenes que contienen el píxel. Cada
 muestra se transforma al dominio radiométrico común y recibe una confianza de
-saturación según la transición descrita en 6.4. Su varianza se aproxima con un
-modelo Poisson-gaussiano genérico:
+saturación según la transición descrita en 6.4. La incertidumbre total combina
+tres términos medibles:
 
 ```text
-varianza_RAW ≈ muestra_RAW + 4²
-varianza_E   ≈ escala_respuesta² · varianza_RAW
+varianza_sensor    ≈ escala_respuesta² · (muestra_RAW + 4²)
+varianza_respuesta ≈ radiancia² · dispersión_log_respuesta²
+varianza_registro  ≈ huella_interpolación · gradiente_CFA²
+varianza_total     = varianza_sensor + varianza_respuesta + varianza_registro
 ```
 
 El término `4²` es un suelo conservador de ruido de lectura de cuatro unidades
 RAW. No sustituye un perfil medido de la cámara, pero permite ponderar más las
-observaciones con menor ruido estimado.
+observaciones con menor ruido estimado. La huella de interpolación vale cero en
+una muestra CFA exacta y aumenta con el desplazamiento fraccionario bilineal. El
+gradiente se calcula entre vecinos de la misma fase Bayer; por ello una pequeña
+incertidumbre geométrica importa poco en una zona plana y mucho en un borde.
 
-El centro robusto se obtiene mediante la mediana. Para cada muestra se compara
-su residuo con la observación más próxima a ese centro:
+El centro inicial es la mediana ponderada por saturación y varianza. Cuatro
+iteraciones IRLS vuelven a estimarlo mediante pesos Tukey:
 
 ```text
-corte_k = 5 · √(varianza_k + varianza_ancla) + 0.01 · señal
-peso_k  = confianza_saturación · Tukey(residuo_k / corte_k) / varianza_k
+corte_k = 4.685 · √varianza_total_k
+peso_k  = confianza_saturación · Tukey(residuo_k / corte_k) / varianza_total_k
 ```
 
-Solo se produce la media si al menos dos exposiciones superan el control de
-coherencia. Si no hay consenso, se conserva el resultado seleccionado por la
-máscara; esto es especialmente importante con dos observaciones discrepantes,
-donde no hay información suficiente para decidir cuál representa la escena.
+En modo `robust` se eliminó la tolerancia anterior proporcional al 1 % de la
+señal, que podía aceptar discrepancias grandes precisamente en altas luces y
+detalle brillante.
+El consenso final se cuantifica mediante el tamaño efectivo de muestra:
+
+```text
+N_efectivo = (Σ peso_k)² / Σ peso_k²
+confianza  = limitar(N_efectivo - 1, 0, 1)
+resultado  = fallback_máscara + confianza · (centro_robusto - fallback_máscara)
+```
+
+Una sola observación efectiva produce confianza cero; dos observaciones con
+pesos semejantes se aproximan a confianza uno. Los casos intermedios retornan
+gradualmente a la exposición seleccionada por la máscara, en vez de tomar una
+decisión binaria. Con dos observaciones discrepantes no hay información
+suficiente para decidir cuál representa la escena y se conserva el fallback.
 
 Las zonas detectadas como movimiento y los píxeles editados manualmente siempre
 mantienen una sola fuente. Por tanto, la máscara no implica que las demás
 exposiciones dejen de aportar información: fija la exposición segura de partida
 y el fallback, mientras las exposiciones coherentes adicionales reducen ruido.
 
-En la GUI aparece en las propiedades del DNG como **Combine consistent
-exposures to reduce noise** y puede guardarse como valor predeterminado.
+En la GUI aparece en las propiedades del DNG como **Fusion mode**, con las
+opciones **Robust (detail preserving)**, **Legacy (stronger smoothing)** y
+**Off (mask only)**. Puede guardarse como valor predeterminado. Una preferencia
+antigua `averageSamples=true` migra a `robust`, y `false` migra a `off`.
 
 ## 9. Preservación de exposición entre series
 
@@ -612,7 +644,7 @@ uso inmediato:
   sugerida.
 
 Las preferencias de alineamiento, deghosting, bits por muestra, preview,
-suavizado, promedio y preservación de exposición pueden persistirse mediante
+suavizado, modo de fusión y preservación de exposición pueden persistirse mediante
 `QSettings` cuando el diálogo correspondiente lo permite.
 
 ## 14. CLI y automatización
@@ -624,8 +656,9 @@ suavizado, promedio y preservación de exposición pueden persistirse mediante
 --nogui                  fuerza el procesamiento por consola
 --alignment MODE         integer, subpixel o affine
 --deghost N              umbral porcentual de movimiento
---average                fusiona exposiciones coherentes (predeterminado)
---no-average             usa solo la selección de la máscara
+--fusion MODE            robust, legacy u off
+--average                alias de --fusion robust
+--no-average             alias de --fusion off
 --preserve-exposure      conserva escala entre brackets
 --bracket-size N         limita cada grupo a N imágenes
 ```
@@ -680,7 +713,7 @@ IMG_1201.dng + IMG_1202.dng + IMG_1203.dng → %cf = IMG
 | Recorte óptimo | Sí | `--no-crop` |
 | Nivel blanco personalizado | Sí | `-w` |
 | Deghosting | Sí | `--deghost N` |
-| Fusión para reducir ruido | Sí | `--average` / `--no-average` |
+| Fusión robusta/heredada/desactivada | Sí | `--fusion MODE` |
 | Preservar exposición | Sí | `--preserve-exposure` |
 | 16/24/32 bits | Sí | `-b` |
 | Tamaño de preview DNG | Sí | `-p` |
@@ -750,6 +783,8 @@ Qt, DLL transitivas, licencia, README y `BUILD-INFO.txt`.
 - que una transformación identidad reproduce exactamente las muestras;
 - que un warp con traslación fraccionaria y rotación conserva separadas las
   cuatro fases Bayer;
+- que la identidad declara huella de interpolación nula y un warp fraccionario
+  declara incertidumbre de remuestreo en la mayor parte de su área válida;
 - que no se reduce inesperadamente el área válida.
 
 El test asigna rangos numéricos disjuntos a `R`, `G1`, `G2` y `B`; cualquier
@@ -780,6 +815,12 @@ Test #2: merge-quality ... Passed
   rechazo robusto del outlier;
 - dos muestras incompatibles comprueban el fallback a la exposición seleccionada
   por la máscara;
+- dos muestras próximas comprueban que ambas contribuyen cuando el tamaño
+  efectivo de muestra se acerca a dos;
+- dos valores brillantes sin consenso comprueban que ya no existe una tolerancia
+  arbitraria proporcional a la señal;
+- el mismo caso confirma que `legacy` conserva deliberadamente el promedio
+  permisivo anterior y produce un resultado distinto de `robust`;
 - un punto discrepante aislado y una región discrepante compacta comprueban que
   el primero se trata como ruido y la segunda como movimiento.
 
@@ -818,8 +859,15 @@ coherencia estructural del archivo para LibRaw/HDRMerge.
 La composición se comprobó también con `IMG_2586.CR2`, `IMG_2587.CR2` e
 `IMG_2588.CR2`. La corrección mantuvo el blanco útil en el rango declarado por
 la cámara, eliminó el arco cromático que coincidía con el cambio de exposición
-y produjo una reducción de ruido aproximada del 10 al 20 % en recortes planos,
-según la zona medida.
+y conservó el contorno de la corona sin una transición cromática visible.
+
+En un recorte oscuro de `800 x 800`, muestreando por separado las cuatro fases
+CFA, la nueva fusión redujo la desviación estándar aproximadamente entre un 3 %
+y un 8 % frente a `--no-average`. La formulación anterior alcanzaba entre un 5 %
+y un 11 % en el mismo recorte, pero aceptaba más fácilmente discrepancias en
+zonas brillantes. La pérdida moderada de reducción de ruido es deliberada: el
+nuevo estimador da prioridad a conservar detalle débil y bordes cuando el
+registro o la escala radiométrica no justifican un promedio completo.
 
 El mosaico RAW generado con `--no-average` se comparó con el resultado del modo
 de selección anterior y no presentó diferencias de píxel. Esta opción permite
@@ -874,6 +922,12 @@ composición basada únicamente en la máscara:
 
 ```bash
 hdrmerge-nogui.exe --no-average -o resultado.dng *.dng
+```
+
+Para conservar el promedio experimental anterior, más intenso:
+
+```bash
+hdrmerge-nogui.exe --fusion legacy -o resultado.dng *.dng
 ```
 
 ### Lotes de tres exposiciones para panorama

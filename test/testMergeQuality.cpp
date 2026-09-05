@@ -42,8 +42,8 @@ int main() {
     bool ok = true;
     const size_t width = 32, height = 24;
     RawParameters params = makeParameters(width, height);
-    ok &= check(SaveOptions().averageSamples,
-                "noise-aware exposure fusion is not enabled by default");
+    ok &= check(SaveOptions().fusionMode == FusionMode::Robust,
+                "robust exposure fusion is not enabled by default");
 
     // Saturation confidence must fade continuously before clipping.
     {
@@ -118,7 +118,7 @@ int main() {
                     "global exposure estimate was biased by a local outlier");
 
         stack.generateMask();
-        Array2D<float> result = stack.compose(responseParams, 3, false, true);
+        Array2D<float> result = stack.compose(responseParams, 3, FusionMode::Off, true);
         for (size_t y = 0; y < responseHeight; ++y) {
             for (size_t x = 0; x < responseWidth; ++x) {
                 if (x >= 16 && x < 48 && y >= 16 && y < 48) continue;
@@ -175,7 +175,7 @@ int main() {
             for (size_t x = width/2; x < width; ++x)
                 stack.getMask()(x, y) = 2;
 
-        Array2D<float> result = stack.compose(params, 6, false, true);
+        Array2D<float> result = stack.compose(params, 6, FusionMode::Off, true);
         for (size_t y = 0; y < height; ++y)
             for (size_t x = 0; x < width; ++x)
                 ok &= check(result(x, y) >= 9999.0f && result(x, y) <= 60001.0f,
@@ -192,7 +192,7 @@ int main() {
         stack.addImage(makeImage(sampleA, params));
         stack.addImage(makeImage(sampleB, params));
         stack.generateMask();
-        Array2D<float> result = stack.compose(params, 0, true, true);
+        Array2D<float> result = stack.compose(params, 0, FusionMode::Robust, true);
         ok &= check(result(width/2, height/2) >= 990.0f && result(width/2, height/2) <= 1020.0f,
                     "robust temporal average did not reject an outlier");
     }
@@ -206,9 +206,43 @@ int main() {
         stack.addImage(makeImage(selected, params));
         stack.addImage(makeImage(conflicting, params));
         stack.generateMask();
-        Array2D<float> result = stack.compose(params, 0, true, true);
+        Array2D<float> result = stack.compose(params, 0, FusionMode::Robust, true);
         ok &= check(std::abs(result(width/2, height/2) - 5000.0f) < 1.0f,
                     "inconsistent exposures were blended without consensus");
+    }
+
+    // Two close observations carry nearly two effective samples and should
+    // retain the measurable noise benefit of temporal fusion.
+    {
+        std::vector<uint16_t> sampleA(width*height, 1010);
+        std::vector<uint16_t> sampleB(width*height, 1000);
+        ImageStack stack;
+        stack.addImage(makeImage(sampleA, params));
+        stack.addImage(makeImage(sampleB, params));
+        stack.generateMask();
+        Array2D<float> result = stack.compose(params, 0, FusionMode::Robust, true);
+        ok &= check(result(width/2, height/2) > 1001.0f &&
+                    result(width/2, height/2) < 1009.0f,
+                    "coherent exposures did not contribute to the robust estimate");
+    }
+
+    // A one-percent allowance grows too permissive in bright detailed areas.
+    // Without effective consensus the mask-selected sample must remain intact.
+    {
+        std::vector<uint16_t> selected(width*height, 10500);
+        std::vector<uint16_t> conflicting(width*height, 10000);
+        ImageStack stack;
+        stack.addImage(makeImage(selected, params));
+        stack.addImage(makeImage(conflicting, params));
+        stack.generateMask();
+        Array2D<float> result = stack.compose(params, 0, FusionMode::Robust, true);
+        ok &= check(std::abs(result(width/2, height/2) - 10500.0f) < 1.0f,
+                    "weak high-signal consensus softened the selected detail");
+
+        Array2D<float> legacy = stack.compose(params, 0, FusionMode::Legacy, true);
+        ok &= check(legacy(width/2, height/2) > 10000.0f &&
+                    legacy(width/2, height/2) < 10500.0f,
+                    "legacy fusion no longer reproduces its permissive bright-signal average");
     }
 
     // An isolated discrepancy is noise; a spatially supported region is motion.

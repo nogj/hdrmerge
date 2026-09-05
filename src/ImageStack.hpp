@@ -49,7 +49,8 @@ public:
     void crop();
     void computeResponseFunctions();
     void generateMask(int deghostThreshold = 0);
-    Array2D<float> compose(const RawParameters & md, int featherRadius, bool averageSamples = false,
+    Array2D<float> compose(const RawParameters & md, int featherRadius,
+                           FusionMode fusionMode = FusionMode::Robust,
                            bool preserveExposure = false) const;
 
     size_t size() const { return images.size(); }

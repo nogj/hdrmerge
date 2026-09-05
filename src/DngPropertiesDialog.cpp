@@ -105,10 +105,16 @@ DngPropertiesDialog::DngPropertiesDialog(QWidget * parent, Qt::WindowFlags f)
     formLayout->addRow(tr("Preview size:"), previewSelector);
     formLayout->addRow(tr("Mask blur radius:"), radiusSelector);
 
-    averageSamplesBox = new QCheckBox(tr("Combine consistent exposures to reduce noise"), this);
-    averageSamplesBox->setChecked(averageSamples);
-    averageSamplesBox->setToolTip(tr("Inconsistent, moving and manually selected areas keep a single exposure."));
-    formLayout->addRow(tr("Noise reduction:"), averageSamplesBox);
+    fusionModeSelector = new QComboBox(this);
+    fusionModeSelector->addItem(tr("Robust (detail preserving)"),
+                                static_cast<int>(FusionMode::Robust));
+    fusionModeSelector->addItem(tr("Legacy (stronger smoothing)"),
+                                static_cast<int>(FusionMode::Legacy));
+    fusionModeSelector->addItem(tr("Off (mask only)"),
+                                static_cast<int>(FusionMode::Off));
+    fusionModeSelector->setCurrentIndex(fusionModeSelector->findData(static_cast<int>(fusionMode)));
+    fusionModeSelector->setToolTip(tr("Robust protects detail; Legacy retains the previous, stronger average."));
+    formLayout->addRow(tr("Fusion mode:"), fusionModeSelector);
 
     preserveExposureBox = new QCheckBox(tr("Preserve absolute exposure across bracketed sets"), this);
     preserveExposureBox->setChecked(preserveExposure);
@@ -139,7 +145,7 @@ DngPropertiesDialog::DngPropertiesDialog(QWidget * parent, Qt::WindowFlags f)
 
 
 void DngPropertiesDialog::accept() {
-    averageSamples = averageSamplesBox->isChecked();
+    fusionMode = static_cast<FusionMode>(fusionModeSelector->currentData().toInt());
     preserveExposure = preserveExposureBox->isChecked();
     saveMask = maskFileSelector->isEnabled();
     maskFileName = QDir::toNativeSeparators(maskFileEditor->text()).toLocal8Bit().constData();
@@ -150,7 +156,8 @@ void DngPropertiesDialog::accept() {
         settings.setValue("saveMask", saveMask);
         settings.setValue("maskFileName", maskFileName);
         settings.setValue("featherRadius", featherRadius);
-        settings.setValue("averageSamples", averageSamples);
+        settings.setValue("fusionMode", static_cast<int>(fusionMode));
+        settings.setValue("averageSamples", fusionMode != FusionMode::Off);
         settings.setValue("preserveExposure", preserveExposure);
     }
     QDialog::accept();
@@ -162,7 +169,15 @@ void DngPropertiesDialog::loadDefaultOptions() {
     bps = settings.value("bps", 16).toInt();
     previewSize = settings.value("previewSize", 2).toInt();
     saveMask = settings.value("saveMask", false).toBool();
-    averageSamples = settings.value("averageSamples", true).toBool();
+    if (settings.contains("fusionMode")) {
+        const int storedMode = settings.value("fusionMode").toInt();
+        fusionMode = storedMode >= static_cast<int>(FusionMode::Off) &&
+                     storedMode <= static_cast<int>(FusionMode::Robust) ?
+                     static_cast<FusionMode>(storedMode) : FusionMode::Robust;
+    } else {
+        fusionMode = settings.value("averageSamples", true).toBool() ?
+                     FusionMode::Robust : FusionMode::Off;
+    }
     preserveExposure = settings.value("preserveExposure", false).toBool();
     maskFileName = settings.value("maskFileName", "%od/%of_mask.png").toString().toLocal8Bit().constData();
     featherRadius = settings.value("featherRadius", 3).toInt();

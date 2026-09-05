@@ -26,6 +26,7 @@
 #include <QDialog>
 #include <QLineEdit>
 #include <QCheckBox>
+#include <QComboBox>
 #include "LoadSaveOptions.hpp"
 
 namespace hdrmerge {
@@ -58,7 +59,7 @@ private:
     QLineEdit * maskFileEditor;
     QWidget * maskFileSelector;
     QCheckBox * saveOptions;
-    QCheckBox * averageSamplesBox;
+    QComboBox * fusionModeSelector;
     QCheckBox * preserveExposureBox;
 };
 

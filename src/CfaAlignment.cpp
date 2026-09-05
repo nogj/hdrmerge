@@ -160,11 +160,13 @@ void hdrmerge::resampleCfa(const Array2D<uint16_t> & source,
                            Array2D<uint16_t> & destination,
                            Array2D<uint8_t> & validity,
                            const CFAPattern & pattern,
-                           const AlignmentTransform & transform) {
+                           const AlignmentTransform & transform,
+                           Array2D<float> * interpolationVariance) {
     const int width = static_cast<int>(source.getWidth());
     const int height = static_cast<int>(source.getHeight());
     destination.resize(width, height);
     validity.resize(width, height);
+    if (interpolationVariance) interpolationVariance->resize(width, height);
 
     #pragma omp parallel for schedule(dynamic, 16)
     for (int y = 0; y < height; ++y) {
@@ -195,6 +197,7 @@ void hdrmerge::resampleCfa(const Array2D<uint16_t> & source,
             if (!inside) {
                 destination[pos] = 0;
                 validity[pos] = 0;
+                if (interpolationVariance) (*interpolationVariance)[pos] = 0.0f;
                 continue;
             }
 
@@ -205,6 +208,12 @@ void hdrmerge::resampleCfa(const Array2D<uint16_t> & source,
             const double value = top * (1.0 - fy) + bottom * fy;
             destination[pos] = static_cast<uint16_t>(std::max(0.0, std::min(65535.0, std::round(value))));
             validity[pos] = 1;
+            if (interpolationVariance) {
+                // Variance of the bilinear sampling footprint in full-resolution
+                // pixel coordinates. It is zero for an exact CFA sample.
+                (*interpolationVariance)[pos] = static_cast<float>(
+                    4.0 * (fx * (1.0 - fx) + fy * (1.0 - fy)));
+            }
         }
     }
 }

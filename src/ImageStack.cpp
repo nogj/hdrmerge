@@ -43,6 +43,7 @@ struct ExposureEdge {
     size_t first;
     size_t second;
     double difference;
+    double scatter;
     double weight;
     double robustWeight;
 };
@@ -320,7 +321,7 @@ void ImageStack::computeResponseFunctions() {
         for (size_t j = i + 1; j < images.size(); ++j) {
             const Image::ExposureRatioEstimate estimate = images[i].estimateExposureRatio(images[j]);
             if (!estimate.valid()) continue;
-            edges.push_back({i, j, estimate.logRatio,
+            edges.push_back({i, j, estimate.logRatio, estimate.logScatter,
                              std::min(1e8, estimate.weight), 1.0});
             Log::debug("Exposure pair ", i, " -> ", j, ": ",
                        std::exp(-estimate.logRatio), "x from ", estimate.tiles,
@@ -351,8 +352,22 @@ void ImageStack::computeResponseFunctions() {
 
     const double anchor = images.back().getRelativeExposure();
     for (size_t i = 0; i < images.size(); ++i) {
-        images[i].setRelativeExposure(anchor * std::exp(relativeLogs[i]));
-        Log::debug("Global response scale ", i, ": ", images[i].getRelativeExposure());
+        double scatterSum = 0.0;
+        double scatterWeight = 0.0;
+        if (i + 1 < images.size()) {
+            for (const ExposureEdge & edge : edges) {
+                if (edge.first != i && edge.second != i) continue;
+                const double weight = edge.weight * edge.robustWeight;
+                const double residual = relativeLogs[edge.first] - relativeLogs[edge.second] -
+                                        edge.difference;
+                scatterSum += weight * (edge.scatter * edge.scatter + residual * residual);
+                scatterWeight += weight;
+            }
+        }
+        const double scatter = scatterWeight > 0.0 ? std::sqrt(scatterSum / scatterWeight) : 0.0;
+        images[i].setRelativeExposure(anchor * std::exp(relativeLogs[i]), scatter);
+        Log::debug("Global response scale ", i, ": ", images[i].getRelativeExposure(),
+                   ", log scatter: ", images[i].getResponseScatter());
     }
 }
 
@@ -653,7 +668,24 @@ struct RadianceSample {
     double value;
     double variance;
     double saturationWeight;
+    double weight;
 };
+
+static double weightedMedian(std::vector<RadianceSample> samples) {
+    std::sort(samples.begin(), samples.end(), [](const RadianceSample & a,
+                                                 const RadianceSample & b) {
+        return a.value < b.value;
+    });
+    double total = 0.0;
+    for (const RadianceSample & sample : samples) total += sample.weight;
+    double accumulated = 0.0;
+    for (const RadianceSample & sample : samples) {
+        accumulated += sample.weight;
+        if (2.0 * accumulated >= total) return sample.value;
+    }
+    return samples.empty() ? 0.0 : samples.back().value;
+}
+
 
 static double median(std::vector<double> values) {
     if (values.empty()) return 0.0;
@@ -662,7 +694,8 @@ static double median(std::vector<double> values) {
     return values.size() & 1 ? values[middle] : 0.5 * (values[middle - 1] + values[middle]);
 }
 
-static double robustRadianceAverage(const std::vector<Image> & images, size_t first,
+
+static double legacyRadianceAverage(const std::vector<Image> & images, size_t first,
                                     size_t x, size_t y, double fallback) {
     std::vector<RadianceSample> samples;
     samples.reserve(images.size() - first);
@@ -675,33 +708,30 @@ static double robustRadianceAverage(const std::vector<Image> & images, size_t fi
         if (saturationWeight <= 0.0) continue;
         const double raw = std::max(1.0, static_cast<double>(images[k](x, y)));
         const double value = images[k].exposureAt(x, y);
-        // Generic Poisson-Gaussian sensor model. The constant represents a
-        // conservative four-DN read-noise floor; response scaling propagates
-        // that variance into the common radiometric domain.
         double responseScale = std::abs(value) / raw;
         if (responseScale < 1e-9) responseScale = std::abs(images[k].getRelativeExposure());
         const double variance = std::max(1e-6, responseScale * responseScale * (raw + 16.0));
-        samples.push_back({value, variance, saturationWeight});
+        samples.push_back({value, variance, saturationWeight, 0.0});
         values.push_back(value);
     }
-    if (samples.size() < 2) return samples.empty() ? fallback : samples.front().value;
+    if (samples.size() < 2) return fallback;
 
     const double centre = median(values);
     const RadianceSample * anchor = &samples.front();
-    for (const auto & sample : samples)
+    for (const RadianceSample & sample : samples)
         if (std::abs(sample.value - centre) < std::abs(anchor->value - centre)) anchor = &sample;
 
     double weighted = 0.0;
     double weights = 0.0;
     size_t accepted = 0;
-    for (const auto & sample : samples) {
+    for (const RadianceSample & sample : samples) {
         const double residual = std::abs(sample.value - anchor->value);
         const double signal = std::max(1.0, std::max(std::abs(sample.value),
                                                      std::abs(anchor->value)));
         const double cutoff = 5.0 * std::sqrt(sample.variance + anchor->variance) + 0.01 * signal;
         const double u = cutoff > 0.0 ? residual / cutoff : 0.0;
         if (u >= 1.0) continue;
-        const double robust = (1.0 - u*u) * (1.0 - u*u); // Tukey biweight
+        const double robust = (1.0 - u*u) * (1.0 - u*u);
         const double weight = sample.saturationWeight * robust / sample.variance;
         weighted += sample.value * weight;
         weights += weight;
@@ -710,10 +740,92 @@ static double robustRadianceAverage(const std::vector<Image> & images, size_t fi
     return accepted >= 2 && weights > 0.0 ? weighted / weights : fallback;
 }
 
+
+static double robustRadianceAverage(const std::vector<Image> & images, size_t first,
+                                    size_t selected, size_t x, size_t y, double fallback) {
+    std::vector<RadianceSample> samples;
+    samples.reserve(images.size() - first);
+    const double selectedInterpolation = images[selected].interpolationVarianceAt(x, y);
+    double selectedGradient = -1.0;
+
+    for (size_t k = first; k < images.size(); ++k) {
+        if (!images[k].contains(x, y)) continue;
+        const double saturationWeight = images[k].saturationWeightAround(x, y);
+        if (saturationWeight <= 0.0) continue;
+        const double raw = std::max(1.0, static_cast<double>(images[k](x, y)));
+        const double value = images[k].exposureAt(x, y);
+        // Generic Poisson-Gaussian sensor model. The constant represents a
+        // conservative four-DN read-noise floor; response scaling propagates
+        // that variance into the common radiometric domain.
+        double responseScale = std::abs(value) / raw;
+        if (responseScale < 1e-9) responseScale = std::abs(images[k].getRelativeExposure());
+        const double sensorVariance = responseScale * responseScale * (raw + 16.0);
+        const double responseScatter = images[k].getResponseScatter();
+        const double responseVariance = value * value * responseScatter * responseScatter;
+        double alignmentVariance = 0.0;
+        if (k != selected) {
+            const double interpolation = images[k].interpolationVarianceAt(x, y) +
+                                         selectedInterpolation;
+            if (interpolation > 0.0) {
+                if (selectedGradient < 0.0)
+                    selectedGradient = images[selected].radianceGradientSquared(x, y);
+                const double sharedGradient = std::min(images[k].radianceGradientSquared(x, y),
+                                                       selectedGradient);
+                alignmentVariance = interpolation * sharedGradient;
+            }
+        }
+        const double variance = std::max(1e-6, sensorVariance + responseVariance +
+                                               alignmentVariance);
+        const double weight = saturationWeight / variance;
+        samples.push_back({value, variance, saturationWeight, weight});
+    }
+    if (samples.size() < 2) return samples.empty() ? fallback : samples.front().value;
+
+    double centre = weightedMedian(samples);
+    for (int iteration = 0; iteration < 4; ++iteration) {
+        double weighted = 0.0;
+        double weights = 0.0;
+        for (RadianceSample & sample : samples) {
+            const double cutoff = 4.685 * std::sqrt(sample.variance);
+            const double u = cutoff > 0.0 ? std::abs(sample.value - centre) / cutoff : 0.0;
+            const double robust = u < 1.0 ? (1.0 - u*u) * (1.0 - u*u) : 0.0;
+            sample.weight = sample.saturationWeight * robust / sample.variance;
+            weighted += sample.value * sample.weight;
+            weights += sample.weight;
+        }
+        if (weights <= 0.0) return fallback;
+        const double updated = weighted / weights;
+        if (std::abs(updated - centre) <= 1e-6 * std::max(1.0, std::abs(centre))) {
+            centre = updated;
+            break;
+        }
+        centre = updated;
+    }
+
+    double weightSum = 0.0;
+    double squaredWeightSum = 0.0;
+    double weighted = 0.0;
+    for (RadianceSample & sample : samples) {
+        const double cutoff = 4.685 * std::sqrt(sample.variance);
+        const double u = cutoff > 0.0 ? std::abs(sample.value - centre) / cutoff : 0.0;
+        const double robust = u < 1.0 ? (1.0 - u*u) * (1.0 - u*u) : 0.0;
+        sample.weight = sample.saturationWeight * robust / sample.variance;
+        weightSum += sample.weight;
+        squaredWeightSum += sample.weight * sample.weight;
+        weighted += sample.value * sample.weight;
+    }
+    if (weightSum <= 0.0 || squaredWeightSum <= 0.0) return fallback;
+    centre = weighted / weightSum;
+    const double effectiveSamples = weightSum * weightSum / squaredWeightSum;
+    const double confidence = std::max(0.0, std::min(1.0, effectiveSamples - 1.0));
+    return fallback + confidence * (centre - fallback);
+}
+
 } // namespace
 
 
-Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadius, bool averageSamples,
+Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadius,
+                                   FusionMode fusionMode,
                                    bool preserveExposure) const {
     Timer t("Compose");
     Array2D<float> dst(params.rawWidth, params.rawHeight);
@@ -795,9 +907,11 @@ Array2D<float> ImageStack::compose(const RawParameters & params, int featherRadi
                 const bool automaticMotion = motionMask.size() == mask.size() && motionMask(x, y) &&
                                              chosen == origMask(x, y);
                 const bool manuallySelected = chosen != origMask(x, y);
-                if (averageSamples && !automaticMotion && !manuallySelected) {
+                if (fusionMode != FusionMode::Off && !automaticMotion && !manuallySelected) {
                     const size_t firstValid = std::max<size_t>(chosen, origMask(x, y));
-                    value = robustRadianceAverage(images, firstValid, x, y, value);
+                    value = fusionMode == FusionMode::Legacy ?
+                        legacyRadianceAverage(images, firstValid, x, y, value) :
+                        robustRadianceAverage(images, firstValid, chosen, x, y, value);
                 }
 
                 dst(x, y) = static_cast<float>(value);
